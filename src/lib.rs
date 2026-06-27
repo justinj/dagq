@@ -1,6 +1,6 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
@@ -406,8 +406,20 @@ pub struct ExprTree<'a>(&'a Expr);
 
 impl fmt::Display for ExprTree<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt_tree(f, "", true, true)
+        f.write_str(&self.0.chain_string(0))
     }
+}
+
+fn write_arg(out: &mut String, expr: &Expr, indent: usize) -> fmt::Result {
+    let rendered = expr.chain_string(indent);
+    let Some(rendered) = rendered.strip_suffix('\n') else {
+        return Ok(());
+    };
+    let Some((prefix, last)) = rendered.rsplit_once('\n') else {
+        return writeln!(out, "{},", rendered);
+    };
+    writeln!(out, "{}", prefix)?;
+    writeln!(out, "{},", last)
 }
 
 impl Expr {
@@ -415,58 +427,59 @@ impl Expr {
         ExprTree(self)
     }
 
-    fn fmt_tree(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        prefix: &str,
-        is_last: bool,
-        is_root: bool,
-    ) -> fmt::Result {
-        if is_root {
-            writeln!(f, "{}", self.tree_label())?;
-        } else {
-            writeln!(
-                f,
-                "{}{}{}",
-                prefix,
-                if is_last { "└── " } else { "├── " },
-                self.tree_label()
-            )?;
-        }
-
-        let child_prefix = if is_root {
-            String::new()
-        } else {
-            format!("{}{}", prefix, if is_last { "    " } else { "│   " })
-        };
-        let children = self.children();
-        for (idx, child) in children.iter().enumerate() {
-            child.fmt_tree(f, &child_prefix, idx + 1 == children.len(), false)?;
-        }
-        Ok(())
+    fn chain_string(&self, indent: usize) -> String {
+        let mut out = String::new();
+        self.write_chain(&mut out, indent).unwrap();
+        out
     }
 
-    fn tree_label(&self) -> String {
+    fn write_chain(&self, out: &mut String, indent: usize) -> fmt::Result {
+        let pad = "  ".repeat(indent);
         match self {
-            Expr::Constant(vxs) => format!("Constant {:?}", vxs),
-            Expr::Up { lo, hi, .. } => format!("Up lo={} hi={}", lo, fmt_hi(*hi)),
-            Expr::Down { lo, hi, .. } => format!("Down lo={} hi={}", lo, fmt_hi(*hi)),
-            Expr::Range { .. } => "Range".to_string(),
-            Expr::Union(_) => "Union".to_string(),
-            Expr::Intersection(_) => "Intersection".to_string(),
-            Expr::Filter { label, value, .. } => format!("Filter {}={:?}", label, value),
-        }
-    }
-
-    fn children(&self) -> Vec<&Expr> {
-        match self {
-            Expr::Constant(_) => Vec::new(),
-            Expr::Up { input, .. } | Expr::Down { input, .. } | Expr::Filter { input, .. } => {
-                vec![input.as_ref()]
+            Expr::Constant(vxs) => writeln!(out, "{}constant({:?})", pad, vxs),
+            Expr::Up { input, lo, hi } => {
+                input.write_chain(out, indent)?;
+                let method_pad = "  ".repeat(indent + 1);
+                writeln!(out, "{}.up({}, {})", method_pad, lo, fmt_hi(*hi))
             }
-            Expr::Range { lo, hi } => vec![lo.as_ref(), hi.as_ref()],
-            Expr::Union(inputs) | Expr::Intersection(inputs) => inputs.iter().collect(),
+            Expr::Down { input, lo, hi } => {
+                input.write_chain(out, indent)?;
+                let method_pad = "  ".repeat(indent + 1);
+                writeln!(out, "{}.down({}, {})", method_pad, lo, fmt_hi(*hi))
+            }
+            Expr::Filter {
+                input,
+                label,
+                value,
+            } => {
+                input.write_chain(out, indent)?;
+                let method_pad = "  ".repeat(indent + 1);
+                writeln!(out, "{}.filter({:?}, {:?})", method_pad, label, value)
+            }
+            Expr::Range { lo, hi } => {
+                writeln!(out, "{}range(", pad)?;
+                write_arg(out, lo, indent + 1)?;
+                write_arg(out, hi, indent + 1)?;
+                writeln!(out, "{})", pad)
+            }
+            Expr::Union(inputs) => self.write_call(out, indent, "union", inputs),
+            Expr::Intersection(inputs) => self.write_call(out, indent, "intersection", inputs),
         }
+    }
+
+    fn write_call(
+        &self,
+        out: &mut String,
+        indent: usize,
+        name: &str,
+        inputs: &[Expr],
+    ) -> fmt::Result {
+        let pad = "  ".repeat(indent);
+        writeln!(out, "{}{}(", pad, name)?;
+        for input in inputs {
+            write_arg(out, input, indent + 1)?;
+        }
+        writeln!(out, "{})", pad)
     }
 
     pub fn constant(vxs: impl Into<Vec<Vx>>) -> Self {
@@ -474,10 +487,24 @@ impl Expr {
     }
 
     pub fn up(self, lo: usize, hi: Option<usize>) -> Self {
-        Expr::Up {
-            input: Box::new(self),
-            lo,
-            hi,
+        match self {
+            Expr::Up {
+                input,
+                lo: inner_lo,
+                hi: inner_hi,
+            } => {
+                let lo = inner_lo + lo;
+                let hi = match (inner_hi, hi) {
+                    (Some(inner_hi), Some(hi)) => Some(inner_hi + hi),
+                    _ => None,
+                };
+                input.up(lo, hi)
+            }
+            expr => Expr::Up {
+                input: Box::new(expr),
+                lo,
+                hi,
+            },
         }
     }
 
@@ -535,7 +562,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expr_shape_snapshot() {
+    fn test_up_rewrites() {
         let expr = Expr::intersection_all([
             Expr::union_all([
                 Expr::constant(vec![Vx(0)]).up(1, None),
@@ -545,16 +572,32 @@ mod tests {
         ]);
 
         insta::assert_snapshot!(expr.tree().to_string(), @r###"
-        Intersection
-        ├── Union
-        │   ├── Up lo=1 hi=*
-        │   │   └── Constant [Vx(0)]
-        │   └── Down lo=1 hi=2
-        │       └── Constant [Vx(3), Vx(4)]
-        └── Filter name="f"
-            └── Up lo=0 hi=*
-                └── Constant [Vx(0)]
+        intersection(
+          union(
+            constant([Vx(0)])
+              .up(1, *),
+            constant([Vx(3), Vx(4)])
+              .down(1, 2),
+          ),
+          constant([Vx(0)])
+            .up(0, *)
+            .filter("name", "f"),
+        )
         "###);
+
+        let expr = Expr::constant(vec![Vx(0)]).up(0, None).up(0, None);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @"
+        constant([Vx(0)])
+          .up(0, *)
+        ");
+
+        let expr = Expr::constant(vec![Vx(0)]).up(1, Some(1)).up(0, Some(1));
+
+        insta::assert_snapshot!(expr.tree().to_string(), @"
+        constant([Vx(0)])
+          .up(1, 2)
+        ");
     }
 
     #[test]
