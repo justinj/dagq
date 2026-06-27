@@ -7,6 +7,7 @@ edition = "2024"
 
 [dev-dependencies]
 criterion = "0.5"
+insta = "1"
 
 [[bench]]
 name = "chain"

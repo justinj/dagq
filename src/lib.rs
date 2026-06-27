@@ -1,5 +1,6 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
+use std::fmt;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
@@ -397,7 +398,77 @@ impl<'a> Evaluator<'a> {
     }
 }
 
+fn fmt_hi(hi: Option<usize>) -> String {
+    hi.map_or_else(|| "*".to_string(), |hi| hi.to_string())
+}
+
+pub struct ExprTree<'a>(&'a Expr);
+
+impl fmt::Display for ExprTree<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_tree(f, "", true, true)
+    }
+}
+
 impl Expr {
+    pub fn tree(&self) -> ExprTree<'_> {
+        ExprTree(self)
+    }
+
+    fn fmt_tree(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        prefix: &str,
+        is_last: bool,
+        is_root: bool,
+    ) -> fmt::Result {
+        if is_root {
+            writeln!(f, "{}", self.tree_label())?;
+        } else {
+            writeln!(
+                f,
+                "{}{}{}",
+                prefix,
+                if is_last { "└── " } else { "├── " },
+                self.tree_label()
+            )?;
+        }
+
+        let child_prefix = if is_root {
+            String::new()
+        } else {
+            format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+        };
+        let children = self.children();
+        for (idx, child) in children.iter().enumerate() {
+            child.fmt_tree(f, &child_prefix, idx + 1 == children.len(), false)?;
+        }
+        Ok(())
+    }
+
+    fn tree_label(&self) -> String {
+        match self {
+            Expr::Constant(vxs) => format!("Constant {:?}", vxs),
+            Expr::Up { lo, hi, .. } => format!("Up lo={} hi={}", lo, fmt_hi(*hi)),
+            Expr::Down { lo, hi, .. } => format!("Down lo={} hi={}", lo, fmt_hi(*hi)),
+            Expr::Range { .. } => "Range".to_string(),
+            Expr::Union(_) => "Union".to_string(),
+            Expr::Intersection(_) => "Intersection".to_string(),
+            Expr::Filter { label, value, .. } => format!("Filter {}={:?}", label, value),
+        }
+    }
+
+    fn children(&self) -> Vec<&Expr> {
+        match self {
+            Expr::Constant(_) => Vec::new(),
+            Expr::Up { input, .. } | Expr::Down { input, .. } | Expr::Filter { input, .. } => {
+                vec![input.as_ref()]
+            }
+            Expr::Range { lo, hi } => vec![lo.as_ref(), hi.as_ref()],
+            Expr::Union(inputs) | Expr::Intersection(inputs) => inputs.iter().collect(),
+        }
+    }
+
     pub fn constant(vxs: impl Into<Vec<Vx>>) -> Self {
         Expr::Constant(vxs.into())
     }
@@ -462,6 +533,29 @@ impl Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expr_shape_snapshot() {
+        let expr = Expr::intersection_all([
+            Expr::union_all([
+                Expr::constant(vec![Vx(0)]).up(1, None),
+                Expr::constant(vec![Vx(3), Vx(4)]).down(1, Some(2)),
+            ]),
+            Expr::constant(vec![Vx(0)]).up(0, None).filter("name", "f"),
+        ]);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @r###"
+        Intersection
+        ├── Union
+        │   ├── Up lo=1 hi=*
+        │   │   └── Constant [Vx(0)]
+        │   └── Down lo=1 hi=2
+        │       └── Constant [Vx(3), Vx(4)]
+        └── Filter name="f"
+            └── Up lo=0 hi=*
+                └── Constant [Vx(0)]
+        "###);
+    }
 
     #[test]
     fn range_between_two_revsets() {
