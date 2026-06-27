@@ -1,27 +1,33 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use dagq::{Dag, DagBuilder, Expr, Vx};
 
-fn chain_graph(size: usize) -> (Dag, Vec<Vx>) {
-    assert!(size > 0, "chain graph must have at least one vertex");
+fn parallel_chain_graph(chains: usize, chain_len: usize) -> (Dag, Vec<Vx>) {
+    assert!(chains > 0, "must have at least one chain");
+    assert!(chain_len > 0, "chains must have at least one vertex");
 
     let mut builder = DagBuilder::default();
-    let mut vxs = Vec::with_capacity(size);
-    let mut prev = builder.root();
-    vxs.push(prev);
+    let root = builder.root();
+    let mut vxs = Vec::with_capacity(1 + chains * chain_len);
+    vxs.push(root);
 
-    for _ in 1..size {
-        let next = builder.m([prev]);
-        vxs.push(next);
-        prev = next;
+    for _ in 0..chains {
+        let mut prev = root;
+        for _ in 0..chain_len {
+            let next = builder.m([prev]);
+            vxs.push(next);
+            prev = next;
+        }
     }
 
     (builder.build(), vxs)
 }
 
 fn bench_unbounded_up_chain(c: &mut Criterion) {
-    let (dag, vxs) = chain_graph(10_000);
+    let chains = 1000;
+    let chain_len = 1000;
+    let (dag, vxs) = parallel_chain_graph(chains, chain_len);
 
-    c.bench_function("unbounded up over 10k chain", |b| {
+    c.bench_function("unbounded up over 100 parallel 100-node chains", |b| {
         let mut evaluator = dag.evaluator();
 
         b.iter(|| {
