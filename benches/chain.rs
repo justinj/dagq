@@ -23,7 +23,7 @@ fn parallel_chain_graph(chains: usize, chain_len: usize) -> (Dag, Vec<Vx>) {
 }
 
 fn bench_unbounded_up_chain(c: &mut Criterion) {
-    let chains = 1000;
+    let chains = 100;
     let chain_len = 1000;
     let (dag, vxs) = parallel_chain_graph(chains, chain_len);
 

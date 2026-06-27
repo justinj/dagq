@@ -50,10 +50,6 @@ impl Batch {
         self.data.len()
     }
 
-    fn clear(&mut self) {
-        self.data.clear();
-    }
-
     fn extend(&mut self, d: impl Iterator<Item = Vx>) {
         self.data.extend(d)
     }
@@ -66,9 +62,8 @@ impl Batch {
         self.data.dedup();
     }
 
-    fn join(&self, r: &Relation<Vx>, out: &mut Batch) {
-        out.clear();
-
+    fn join<T: Ord + Clone>(&self, r: &Relation<T>) -> Vec<T> {
+        let mut res = Vec::new();
         let mut bi = 0;
         let mut ri = 0;
 
@@ -79,7 +74,7 @@ impl Batch {
                 Ordering::Equal => {
                     let vx = self.data[bi];
                     while ri < r.data.len() && r.data[ri].0 == vx {
-                        out.data.push(r.data[ri].1);
+                        res.push(r.data[ri].1.clone());
                         ri += 1;
                     }
                     bi += 1;
@@ -87,8 +82,8 @@ impl Batch {
             }
         }
 
-        out.sort_unstable();
-        out.dedup();
+        res.dedup();
+        res
     }
 }
 
@@ -106,12 +101,12 @@ impl Dag {
         self.root
     }
 
-    fn iter_up(&self, vxs: &Batch, out: &mut Batch) {
-        vxs.join(&self.edges, out)
+    fn iter_up(&self, vxs: Batch) -> Batch {
+        Batch::new(vxs.join(&self.edges))
     }
 
-    fn iter_down(&self, vxs: &Batch, out: &mut Batch) {
-        vxs.join(&self.rev_edges, out)
+    fn iter_down(&self, vxs: Batch) -> Batch {
+        Batch::new(vxs.join(&self.rev_edges))
     }
 
     pub fn evaluator(&self) -> Evaluator<'_> {
@@ -195,9 +190,7 @@ impl<'a> Evaluator<'a> {
 
                 if let Some(hi) = hi {
                     for dist in 1..=hi {
-                        let mut next = Batch::new(Vec::new());
-                        self.dag.iter_up(&frontier, &mut next);
-                        frontier = next;
+                        frontier = self.dag.iter_up(frontier);
                         if dist >= lo {
                             res.extend(frontier.iter());
                         }
@@ -205,9 +198,7 @@ impl<'a> Evaluator<'a> {
                 } else {
                     let mut dist = 0;
                     while !frontier.is_empty() {
-                        let mut next = Batch::new(Vec::new());
-                        self.dag.iter_up(&frontier, &mut next);
-                        frontier = next;
+                        frontier = self.dag.iter_up(frontier);
                         dist += 1;
                         if dist >= lo {
                             res.extend(frontier.iter());
@@ -229,9 +220,7 @@ impl<'a> Evaluator<'a> {
 
                 if let Some(hi) = hi {
                     for dist in 1..=hi {
-                        let mut next = Batch::new(Vec::new());
-                        self.dag.iter_down(&frontier, &mut next);
-                        frontier = next;
+                        frontier = self.dag.iter_down(frontier);
                         if dist >= lo {
                             res.extend(frontier.iter());
                         }
@@ -239,9 +228,7 @@ impl<'a> Evaluator<'a> {
                 } else {
                     let mut dist = 0;
                     while !frontier.is_empty() {
-                        let mut next = Batch::new(Vec::new());
-                        self.dag.iter_down(&frontier, &mut next);
-                        frontier = next;
+                        frontier = self.dag.iter_down(frontier);
                         dist += 1;
                         if dist >= lo {
                             res.extend(frontier.iter());
