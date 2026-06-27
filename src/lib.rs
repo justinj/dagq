@@ -2,9 +2,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt::{self, Write as _};
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod physical;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Vx(pub usize);
@@ -208,6 +206,10 @@ where
 }
 
 impl Dag {
+    pub fn all(&self) -> Batch {
+        Batch::new(self.rev_edges.data.iter().map(|&(f, _)| f).collect())
+    }
+
     pub fn root(&self) -> Vx {
         self.root
     }
@@ -280,15 +282,20 @@ impl DagBuilder {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
+    All,
     Constant(Vec<Vx>),
     Up {
         input: Box<Expr>,
+        // Only include results if they appeared in the lo-th round.
         lo: usize,
+        // Don't include results appearing later than the hi-th round.
         hi: Option<usize>,
     },
     Down {
         input: Box<Expr>,
+        // Only include results if they appeared in the lo-th round.
         lo: usize,
+        // Don't include results appearing later than the hi-th round.
         hi: Option<usize>,
     },
     Range {
@@ -304,6 +311,208 @@ pub enum Expr {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct Planner {
+    pub rules: RewriteRules,
+}
+
+impl Default for Planner {
+    fn default() -> Self {
+        Self {
+            rules: RewriteRules::all(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RewriteRules {
+    pub fold_up_up: bool,
+    pub fold_down_down: bool,
+    pub flatten_union: bool,
+    pub flatten_intersection: bool,
+    pub intersection_to_filter: bool,
+}
+
+impl RewriteRules {
+    pub fn all() -> Self {
+        Self {
+            fold_up_up: true,
+            fold_down_down: true,
+            flatten_union: true,
+            flatten_intersection: true,
+            intersection_to_filter: true,
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            fold_up_up: false,
+            fold_down_down: false,
+            flatten_union: false,
+            flatten_intersection: false,
+            intersection_to_filter: false,
+        }
+    }
+}
+
+impl Planner {
+    pub fn optimize(&self, expr: Expr) -> Expr {
+        match expr {
+            Expr::All => expr,
+            Expr::Constant(_) => expr,
+            Expr::Up { input, lo, hi } => {
+                let input = self.optimize(*input);
+                if self.rules.fold_up_up {
+                    match input {
+                        Expr::Up {
+                            input,
+                            lo: inner_lo,
+                            hi: inner_hi,
+                        } => {
+                            let lo = inner_lo + lo;
+                            let hi = match (inner_hi, hi) {
+                                (Some(inner_hi), Some(hi)) => Some(inner_hi + hi),
+                                _ => None,
+                            };
+                            Expr::Up { input, lo, hi }
+                        }
+                        input => Expr::Up {
+                            input: Box::new(input),
+                            lo,
+                            hi,
+                        },
+                    }
+                } else {
+                    Expr::Up {
+                        input: Box::new(input),
+                        lo,
+                        hi,
+                    }
+                }
+            }
+            Expr::Down { input, lo, hi } => {
+                let input = self.optimize(*input);
+                if self.rules.fold_down_down {
+                    match input {
+                        Expr::Down {
+                            input,
+                            lo: inner_lo,
+                            hi: inner_hi,
+                        } => {
+                            let lo = inner_lo + lo;
+                            let hi = match (inner_hi, hi) {
+                                (Some(inner_hi), Some(hi)) => Some(inner_hi + hi),
+                                _ => None,
+                            };
+                            Expr::Down { input, lo, hi }
+                        }
+                        input => Expr::Down {
+                            input: Box::new(input),
+                            lo,
+                            hi,
+                        },
+                    }
+                } else {
+                    Expr::Down {
+                        input: Box::new(input),
+                        lo,
+                        hi,
+                    }
+                }
+            }
+            Expr::Range { lo, hi } => Expr::Range {
+                lo: Box::new(self.optimize(*lo)),
+                hi: Box::new(self.optimize(*hi)),
+            },
+            Expr::Union(inputs) => {
+                let inputs = inputs.into_iter().map(|input| self.optimize(input));
+                if self.rules.flatten_union {
+                    Expr::Union(
+                        inputs
+                            .flat_map(|input| match input {
+                                Expr::Union(inputs) => inputs,
+                                input => vec![input],
+                            })
+                            .collect(),
+                    )
+                } else {
+                    Expr::Union(inputs.collect())
+                }
+            }
+            Expr::Intersection(inputs) => {
+                let mut inputs: Vec<_> = inputs
+                    .into_iter()
+                    .map(|input| self.optimize(input))
+                    .collect();
+
+                if inputs.len() == 0 {
+                    return Expr::All;
+                }
+
+                if inputs.len() == 1 {
+                    return inputs.remove(0);
+                }
+
+                if self.rules.flatten_intersection {
+                    if inputs.iter().any(|i| matches!(i, Expr::Intersection(_))) {
+                        return Expr::Intersection(
+                            inputs
+                                .into_iter()
+                                .flat_map(|input| match input {
+                                    Expr::Intersection(inputs) => inputs,
+                                    input => vec![input],
+                                })
+                                .collect(),
+                        )
+                        .optimize(self);
+                    }
+                }
+
+                if self.rules.intersection_to_filter {
+                    if inputs.iter().any(|input| {
+                        matches!(
+                            input,
+                            Expr::Filter { input, .. }
+                                if matches!(input.as_ref(), Expr::All)
+                        )
+                    }) {
+                        let (hoisted_filters, base_inputs): (Vec<_>, Vec<_>) =
+                            inputs.into_iter().partition(|input| {
+                                matches!(
+                                    input,
+                                    Expr::Filter { input, .. }
+                                        if matches!(input.as_ref(), Expr::All)
+                                )
+                            });
+
+                        let mut expr = Expr::Intersection(base_inputs).optimize(self);
+
+                        for filter in hoisted_filters {
+                            let Expr::Filter { label, value, .. } = filter else {
+                                unreachable!();
+                            };
+                            expr = expr.filter(label, value);
+                        }
+
+                        return expr;
+                    }
+                }
+
+                Expr::Intersection(inputs)
+            }
+            Expr::Filter {
+                input,
+                label,
+                value,
+            } => Expr::Filter {
+                input: Box::new(self.optimize(*input)),
+                label,
+                value,
+            },
+        }
+    }
+}
+
 pub struct Evaluator<'a> {
     dag: &'a Dag,
 }
@@ -311,6 +520,7 @@ pub struct Evaluator<'a> {
 impl<'a> Evaluator<'a> {
     pub fn eval(&mut self, expr: Expr) -> Batch {
         match expr {
+            Expr::All => self.dag.all(),
             Expr::Constant(mut vxs) => {
                 vxs.sort_unstable();
                 vxs.dedup();
@@ -436,6 +646,7 @@ impl Expr {
     fn write_chain(&self, out: &mut String, indent: usize) -> fmt::Result {
         let pad = "  ".repeat(indent);
         match self {
+            Expr::All => writeln!(out, "{}all()", pad,),
             Expr::Constant(vxs) => writeln!(out, "{}constant({:?})", pad, vxs),
             Expr::Up { input, lo, hi } => {
                 input.write_chain(out, indent)?;
@@ -487,24 +698,10 @@ impl Expr {
     }
 
     pub fn up(self, lo: usize, hi: Option<usize>) -> Self {
-        match self {
-            Expr::Up {
-                input,
-                lo: inner_lo,
-                hi: inner_hi,
-            } => {
-                let lo = inner_lo + lo;
-                let hi = match (inner_hi, hi) {
-                    (Some(inner_hi), Some(hi)) => Some(inner_hi + hi),
-                    _ => None,
-                };
-                input.up(lo, hi)
-            }
-            expr => Expr::Up {
-                input: Box::new(expr),
-                lo,
-                hi,
-            },
+        Expr::Up {
+            input: Box::new(self),
+            lo,
+            hi,
         }
     }
 
@@ -517,13 +714,7 @@ impl Expr {
     }
 
     pub fn union(self, other: Expr) -> Self {
-        match self {
-            Expr::Union(mut inputs) => {
-                inputs.push(other);
-                Expr::Union(inputs)
-            }
-            expr => Expr::Union(vec![expr, other]),
-        }
+        Expr::Union(vec![self, other])
     }
 
     pub fn union_all(inputs: impl IntoIterator<Item = Expr>) -> Self {
@@ -531,13 +722,7 @@ impl Expr {
     }
 
     pub fn intersection(self, other: Expr) -> Self {
-        match self {
-            Expr::Intersection(mut inputs) => {
-                inputs.push(other);
-                Expr::Intersection(inputs)
-            }
-            expr => Expr::Intersection(vec![expr, other]),
-        }
+        Expr::Intersection(vec![self, other])
     }
 
     pub fn intersection_all(inputs: impl IntoIterator<Item = Expr>) -> Self {
@@ -550,6 +735,10 @@ impl Expr {
             label: label.into(),
             value: value.into(),
         }
+    }
+
+    pub fn optimize(self, planner: &Planner) -> Self {
+        planner.optimize(self)
     }
 
     pub fn range(lo: Expr, hi: Expr) -> Expr {
@@ -585,18 +774,46 @@ mod tests {
         )
         "###);
 
-        let expr = Expr::constant(vec![Vx(0)]).up(0, None).up(0, None);
+        let planner = Planner::default();
+        let expr = Expr::constant(vec![Vx(0)])
+            .up(0, None)
+            .up(0, None)
+            .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"
         constant([Vx(0)])
           .up(0, *)
         ");
 
-        let expr = Expr::constant(vec![Vx(0)]).up(1, Some(1)).up(0, Some(1));
+        let expr = Expr::constant(vec![Vx(0)])
+            .up(1, Some(1))
+            .up(0, Some(1))
+            .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"
         constant([Vx(0)])
           .up(1, 2)
+        ");
+
+        let expr = Expr::All;
+
+        insta::assert_snapshot!(expr.tree().to_string(), @"all()");
+
+        let planner = Planner {
+            rules: RewriteRules {
+                fold_up_up: false,
+                ..RewriteRules::all()
+            },
+        };
+        let expr = Expr::constant(vec![Vx(0)])
+            .up(0, None)
+            .up(0, None)
+            .optimize(&planner);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @"
+        constant([Vx(0)])
+          .up(0, *)
+          .up(0, *)
         ");
     }
 
@@ -635,23 +852,41 @@ mod tests {
         //          \   /
         //            g
         let z = builder.root();
-        builder.annotate(z, "name", "z");
         let a = builder.m([z]);
-        builder.annotate(a, "name", "a");
         let b = builder.m([z]);
-        builder.annotate(b, "name", "b");
         let c = builder.m([a, b]);
-        builder.annotate(c, "name", "c");
         let d = builder.m([c]);
-        builder.annotate(d, "name", "d");
         let e = builder.m([c]);
-        builder.annotate(e, "name", "e");
         let f = builder.m([e]);
-        builder.annotate(f, "name", "f");
         let g = builder.m([d, f]);
+
+        builder.annotate(c, "author", "Justin Jaffray");
+        builder.annotate(d, "author", "Justin Jaffray");
+
+        builder.annotate(z, "name", "z");
+        builder.annotate(a, "name", "a");
+        builder.annotate(b, "name", "b");
+        builder.annotate(c, "name", "c");
+        builder.annotate(d, "name", "d");
+        builder.annotate(e, "name", "e");
+        builder.annotate(f, "name", "f");
         builder.annotate(g, "name", "g");
 
         let dag = builder.build();
+
+        let query = Expr::Constant(vec![c])
+            .up(0, None)
+            .intersection(Expr::All.filter("author", "Justin Jaffray"));
+
+        let planner = Planner::default();
+
+        let mut evaluator = dag.evaluator();
+
+        println!("{}", query.tree().to_string());
+        let query = query.optimize(&planner);
+        println!("{}", query.tree().to_string());
+
+        println!("{:?}", evaluator.eval(query));
 
         let cases = [
             (Expr::constant(vec![dag.root]).up(1, Some(1)), vec![a, b]),
