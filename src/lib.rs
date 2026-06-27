@@ -290,6 +290,10 @@ pub enum Expr {
         lo: usize,
         hi: Option<usize>,
     },
+    Range {
+        lo: Box<Expr>,
+        hi: Box<Expr>,
+    },
     Union(Vec<Expr>),
     Intersection(Vec<Expr>),
     Filter {
@@ -388,6 +392,7 @@ impl<'a> Evaluator<'a> {
                 };
                 input.filter(value, relation)
             }
+            Expr::Range { lo: _, hi: _ } => unimplemented!(),
         }
     }
 }
@@ -448,11 +453,32 @@ impl Expr {
             value: value.into(),
         }
     }
+
+    pub fn range(lo: Expr, hi: Expr) -> Expr {
+        lo.up(0, None).intersection(hi.down(0, None))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_between_two_revsets() {
+        let mut builder = DagBuilder::default();
+
+        // z -> a -> b -> c
+        let z = builder.root();
+        let a = builder.m([z]);
+        let b = builder.m([a]);
+        let c = builder.m([b]);
+        let dag = builder.build();
+
+        let query = Expr::range(Expr::constant(vec![a]), Expr::constant(vec![c]));
+
+        let mut evaluator = dag.evaluator();
+        assert_eq!(evaluator.eval(query).data, vec![a, b, c]);
+    }
 
     #[test]
     fn it_works() {
