@@ -545,7 +545,7 @@ where
 // The algorithm for DagRange (x::y) is somewhat involved:
 // * first, eagerly compute both x and y, then compute min(gcn(x)) and max(gcn(y)).
 // * do an eager closure over x and Scan([max(gcn(y)), min(gcn(x))]) to arrive at x::
-// * build a reverse index I from the revs in x::
+// * scan and build a reverse index I from the revs in x::
 // * do a closure over y and I
 
 #[cfg(test)]
