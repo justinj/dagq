@@ -2,7 +2,9 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt::{self, Write as _};
 
+pub mod lang;
 mod physical;
+mod render;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Vx(pub usize);

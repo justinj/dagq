@@ -4,7 +4,9 @@ use std::{collections::HashSet, marker::PhantomData};
 
 use reusable_iter::ReusableIntoIter;
 
-trait Ordering {
+pub(super) trait Ordering {
+    type Reversed: Ordering;
+
     const SORTED: bool;
 
     fn cmp<T: Ord>(left: &T, right: &T) -> std::cmp::Ordering;
@@ -17,9 +19,11 @@ trait Ordering {
 }
 
 // Forwards = Child -> Parent
-enum Forwards {}
+pub(super) enum Forwards {}
 
 impl Ordering for Forwards {
+    type Reversed = Backwards;
+
     const SORTED: bool = true;
 
     fn cmp<T: Ord>(left: &T, right: &T) -> std::cmp::Ordering {
@@ -28,9 +32,11 @@ impl Ordering for Forwards {
 }
 
 // Backwards = Parent -> Child
-enum Backwards {}
+pub(super) enum Backwards {}
 
 impl Ordering for Backwards {
+    type Reversed = Forwards;
+
     const SORTED: bool = true;
 
     fn cmp<T: Ord>(left: &T, right: &T) -> std::cmp::Ordering {
@@ -38,8 +44,10 @@ impl Ordering for Backwards {
     }
 }
 
-enum Unordered {}
+pub(super) enum Unordered {}
 impl Ordering for Unordered {
+    type Reversed = Unordered;
+
     const SORTED: bool = false;
 
     fn cmp<T: Ord>(_: &T, _: &T) -> std::cmp::Ordering {
@@ -47,13 +55,13 @@ impl Ordering for Unordered {
     }
 }
 
-struct Batch<T, O: Ordering> {
-    data: Vec<T>,
+pub(super) struct Batch<T, O: Ordering> {
+    pub(super) data: Vec<T>,
     _marker: PhantomData<O>,
 }
 
 impl<T, O: Ordering> Batch<T, O> {
-    fn new(data: Vec<T>) -> Self {
+    pub(super) fn new(data: Vec<T>) -> Self {
         Batch {
             data,
             _marker: PhantomData,
@@ -62,7 +70,7 @@ impl<T, O: Ordering> Batch<T, O> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-struct Rev(u32);
+pub(super) struct Rev(pub(super) u32);
 
 impl PartialOrd for Rev {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -76,7 +84,9 @@ impl Ord for Rev {
     }
 }
 
-trait Operator<T, O: Ordering> {
+pub(super) type BoxOperator<'a, T, O> = Box<dyn Operator<T, O> + 'a>;
+
+pub(super) trait Operator<T, O: Ordering> {
     fn next(&mut self, batch: &mut Batch<T, O>);
 
     fn iter(&mut self) -> OperatorIter<'_, Self, T, O>
@@ -159,17 +169,31 @@ trait Operator<T, O: Ordering> {
     fn range<'a, Y, YO: Ordering>(
         self,
         y: Y,
-        edges: &'a Index<(Rev, Rev), Forwards>,
+        descendants: &'a Index<(Rev, Rev), Backwards>,
+        ancestors: &'a Index<(Rev, Rev), Forwards>,
     ) -> DagRange<'a, Self, Y, O, YO>
     where
         Self: Sized + Operator<Rev, O>,
         Y: Operator<Rev, YO>,
     {
-        DagRange::new(self, y, edges)
+        DagRange::new(self, y, descendants, ancestors)
+    }
+
+    fn reverse(self) -> Reverse<T, Self, O>
+    where
+        Self: Sized,
+    {
+        Reverse::new(self)
     }
 }
 
-struct OperatorIter<'a, Op, T, O: Ordering>
+impl<T, O: Ordering> Operator<T, O> for Box<dyn Operator<T, O> + '_> {
+    fn next(&mut self, batch: &mut Batch<T, O>) {
+        self.as_mut().next(batch)
+    }
+}
+
+pub(super) struct OperatorIter<'a, Op, T, O: Ordering>
 where
     Op: Operator<T, O> + ?Sized,
 {
@@ -200,13 +224,13 @@ where
     }
 }
 
-struct Constant<T, O: Ordering> {
+pub(super) struct Constant<T, O: Ordering> {
     data: Vec<T>,
     _marker: PhantomData<O>,
 }
 
 impl<T: Ord, O: Ordering> Constant<T, O> {
-    fn new(mut data: Vec<T>) -> Self {
+    pub(super) fn new(mut data: Vec<T>) -> Self {
         O::sort(&mut data);
         Self {
             data,
@@ -221,13 +245,13 @@ impl<T, O: Ordering> Operator<T, O> for Constant<T, O> {
     }
 }
 
-struct Index<T, O: Ordering> {
-    data: Vec<T>,
+pub(super) struct Index<T, O: Ordering> {
+    pub(super) data: Vec<T>,
     _marker: PhantomData<O>,
 }
 
 impl<T: Ord, O: Ordering> Index<T, O> {
-    fn new(mut data: Vec<T>) -> Self {
+    pub(super) fn new(mut data: Vec<T>) -> Self {
         O::sort(&mut data);
         Self {
             data,
@@ -235,7 +259,7 @@ impl<T: Ord, O: Ordering> Index<T, O> {
         }
     }
 
-    fn cursor(&self) -> Scan<'_, T, O> {
+    pub(super) fn cursor(&self) -> Scan<'_, T, O> {
         Scan {
             index: self,
             i: 0,
@@ -244,7 +268,7 @@ impl<T: Ord, O: Ordering> Index<T, O> {
     }
 }
 
-struct Scan<'a, T, O: Ordering> {
+pub(super) struct Scan<'a, T, O: Ordering> {
     index: &'a Index<T, O>,
     i: usize,
     end: Option<T>,
@@ -288,7 +312,7 @@ impl<'a, T: Ord + Clone, O: Ordering> Operator<T, O> for Scan<'a, T, O> {
     }
 }
 
-struct Closure<T, U, V, O: Ordering>
+pub(super) struct Closure<T, U, V, O: Ordering>
 where
     U: Operator<T, O>,
     V: Operator<(T, T), O>,
@@ -303,7 +327,7 @@ where
     U: Operator<T, O>,
     V: Operator<(T, T), O>,
 {
-    fn new(u: U, v: V) -> Self {
+    pub(super) fn new(u: U, v: V) -> Self {
         Self {
             u: Some(u),
             v: Buffered::new(v),
@@ -335,6 +359,43 @@ where
     }
 }
 
+pub(super) struct Reverse<T, Op, O: Ordering>
+where
+    Op: Operator<T, O>,
+{
+    input: Option<Op>,
+    _marker: PhantomData<(T, O)>,
+}
+
+impl<T, Op, O: Ordering> Reverse<T, Op, O>
+where
+    Op: Operator<T, O>,
+{
+    pub(super) fn new(input: Op) -> Self {
+        Self {
+            input: Some(input),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T, Op, O: Ordering> Operator<T, O::Reversed> for Reverse<T, Op, O>
+where
+    Op: Operator<T, O>,
+{
+    fn next(&mut self, batch: &mut Batch<T, O::Reversed>) {
+        let Some(mut input) = self.input.take() else {
+            return;
+        };
+
+        let mut data: Vec<_> = input.iter().collect();
+        if O::SORTED {
+            data.reverse();
+        }
+        std::mem::swap(&mut batch.data, &mut data);
+    }
+}
+
 struct Buffered<T, Op, O: Ordering>
 where
     Op: Operator<T, O>,
@@ -348,7 +409,7 @@ impl<T, Op, O: Ordering> Buffered<T, Op, O>
 where
     Op: Operator<T, O>,
 {
-    fn new(operator: Op) -> Self {
+    pub(super) fn new(operator: Op) -> Self {
         Self {
             operator,
             batch: ReusableIntoIter::new(),
@@ -374,7 +435,7 @@ where
     }
 }
 
-struct Map<T, U, Op, F, O: Ordering>
+pub(super) struct Map<T, U, Op, F, O: Ordering>
 where
     Op: Operator<T, O>,
 {
@@ -387,7 +448,7 @@ impl<T, U, Op, F, O: Ordering> Map<T, U, Op, F, O>
 where
     Op: Operator<T, O>,
 {
-    fn new(input: Op, f: F) -> Self {
+    pub(super) fn new(input: Op, f: F) -> Self {
         Self {
             input: Buffered::new(input),
             f,
@@ -412,7 +473,7 @@ where
     }
 }
 
-struct Filter<T, Op, F, O: Ordering>
+pub(super) struct Filter<T, Op, F, O: Ordering>
 where
     Op: Operator<T, O>,
 {
@@ -424,7 +485,7 @@ impl<T, Op, F, O: Ordering> Filter<T, Op, F, O>
 where
     Op: Operator<T, O>,
 {
-    fn new(input: Op, predicate: F) -> Self {
+    pub(super) fn new(input: Op, predicate: F) -> Self {
         Self {
             input: Buffered::new(input),
             predicate,
@@ -450,7 +511,7 @@ where
     }
 }
 
-struct MergeJoin<T, U, V, L, R, O: Ordering>
+pub(super) struct MergeJoin<T, U, V, L, R, O: Ordering>
 where
     L: Operator<(T, U), O>,
     R: Operator<(T, V), O>,
@@ -468,7 +529,7 @@ where
     L: Operator<(T, U), O>,
     R: Operator<(T, V), O>,
 {
-    fn new(left: L, right: R) -> Self {
+    pub(super) fn new(left: L, right: R) -> Self {
         Self {
             left: Buffered::new(left),
             right: Buffered::new(right),
@@ -566,7 +627,9 @@ where
     }
 }
 
-struct Union<T, U, V, O: Ordering>
+// TODO: optimization for set ops: when you get a new batch, peek at the last
+// thing to see if you can just directly emit that batch (or nothing).
+pub(super) struct Union<T, U, V, O: Ordering>
 where
     U: Operator<T, O>,
     V: Operator<T, O>,
@@ -583,7 +646,7 @@ where
     U: Operator<T, O>,
     V: Operator<T, O>,
 {
-    fn new(left: U, right: V) -> Self {
+    pub(super) fn new(left: U, right: V) -> Self {
         Self {
             left: Buffered::new(left),
             right: Buffered::new(right),
@@ -631,7 +694,7 @@ where
     }
 }
 
-struct Intersection<T, U, V, O: Ordering>
+pub(super) struct Intersection<T, U, V, O: Ordering>
 where
     U: Operator<T, O>,
     V: Operator<T, O>,
@@ -648,7 +711,7 @@ where
     U: Operator<T, O>,
     V: Operator<T, O>,
 {
-    fn new(left: U, right: V) -> Self {
+    pub(super) fn new(left: U, right: V) -> Self {
         Self {
             left: Buffered::new(left),
             right: Buffered::new(right),
@@ -693,7 +756,7 @@ where
     }
 }
 
-struct Difference<T, U, V, O: Ordering>
+pub(super) struct Difference<T, U, V, O: Ordering>
 where
     U: Operator<T, O>,
     V: Operator<T, O>,
@@ -710,7 +773,7 @@ where
     U: Operator<T, O>,
     V: Operator<T, O>,
 {
-    fn new(left: U, right: V) -> Self {
+    pub(super) fn new(left: U, right: V) -> Self {
         Self {
             left: Buffered::new(left),
             right: Buffered::new(right),
@@ -763,14 +826,15 @@ where
     }
 }
 
-struct DagRange<'a, X, Y, XO: Ordering, YO: Ordering>
+pub(super) struct DagRange<'a, X, Y, XO: Ordering, YO: Ordering>
 where
     X: Operator<Rev, XO>,
     Y: Operator<Rev, YO>,
 {
     x: Option<X>,
     y: Option<Y>,
-    edges: &'a Index<(Rev, Rev), Forwards>,
+    descendants: &'a Index<(Rev, Rev), Backwards>,
+    ancestors: &'a Index<(Rev, Rev), Forwards>,
     _marker: PhantomData<(XO, YO)>,
 }
 
@@ -779,11 +843,17 @@ where
     X: Operator<Rev, XO>,
     Y: Operator<Rev, YO>,
 {
-    fn new(x: X, y: Y, edges: &'a Index<(Rev, Rev), Forwards>) -> Self {
+    pub(super) fn new(
+        x: X,
+        y: Y,
+        descendants: &'a Index<(Rev, Rev), Backwards>,
+        ancestors: &'a Index<(Rev, Rev), Forwards>,
+    ) -> Self {
         Self {
             x: Some(x),
             y: Some(y),
-            edges,
+            descendants,
+            ancestors,
             _marker: PhantomData,
         }
     }
@@ -796,58 +866,32 @@ where
             return Batch::new(Vec::new());
         };
 
-        let x_revs = Batch::<Rev, Forwards>::new(x.iter().collect());
-        let y_revs = Batch::<Rev, Forwards>::new(y.iter().collect());
-        if x_revs.data.is_empty() || y_revs.data.is_empty() {
+        let x_revs: Vec<_> = x.iter().collect();
+        let y_revs: Vec<_> = y.iter().collect();
+        if x_revs.is_empty() || y_revs.is_empty() {
             return Batch::new(Vec::new());
         }
 
-        let scan_start = *x_revs.data.iter().min().unwrap();
-        let scan_end = *y_revs.data.iter().max().unwrap();
-
-        let mut descendants: HashSet<Rev> = x_revs.data.iter().copied().collect();
-        let mut scan = self
-            .edges
-            .cursor()
-            .with_start((scan_start, Rev(u32::MAX)))
-            .with_end((scan_end, Rev(0)));
-        for (from, to) in
-            <Scan<'_, (Rev, Rev), Forwards> as Operator<(Rev, Rev), Forwards>>::iter(&mut scan)
-        {
-            if descendants.contains(&from) {
-                descendants.insert(to);
+        let mut ancestors: HashSet<_> = y_revs.into_iter().collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &(child, parent) in &self.ancestors.data {
+                if ancestors.contains(&child) && ancestors.insert(parent) {
+                    changed = true;
+                }
             }
         }
 
-        let mut reverse_edges = Batch::<(Rev, Rev), Backwards>::new(Vec::new());
-        for &(from, to) in &self.edges.data {
-            if descendants.contains(&from) && descendants.contains(&to) {
-                reverse_edges.data.push((to, from));
-            }
-        }
-        reverse_edges.data.sort_unstable();
-        reverse_edges.data.reverse();
+        let x_start = Constant::<_, Forwards>::new(x_revs.clone());
+        let x_descendants = Constant::<_, Backwards>::new(x_revs)
+            .descendants(self.descendants)
+            .reverse();
+        let mut range = x_start
+            .union(x_descendants)
+            .filter(|rev: &Rev| ancestors.contains(rev));
 
-        let mut seen = HashSet::new();
-        let mut result = Batch::<Rev, Forwards>::new(Vec::new());
-        for rev in y_revs
-            .data
-            .into_iter()
-            .filter(|rev| descendants.contains(rev))
-        {
-            if seen.insert(rev) {
-                result.data.push(rev);
-            }
-        }
-
-        for (from, to) in reverse_edges.data {
-            if seen.contains(&from) && seen.insert(to) {
-                result.data.push(to);
-            }
-        }
-
-        result.data.reverse();
-        result
+        Batch::<Rev, Forwards>::new(range.iter().collect())
     }
 }
 
@@ -930,6 +974,17 @@ mod test {
         assert_eq!(batch.data.len(), 2000 - CLOSURE_BATCH_SIZE);
         assert_eq!(batch.data.first(), Some(&Rev(975)));
         assert_eq!(batch.data.last(), Some(&Rev(0)));
+    }
+
+    #[test]
+    fn reverse_flips_ordering() {
+        let input = Constant::<_, Forwards>::new(vec![Rev(5), Rev(3), Rev(1)]);
+        let mut reversed = input.reverse();
+
+        assert_eq!(
+            reversed.iter().collect::<Vec<_>>(),
+            vec![Rev(1), Rev(3), Rev(5)]
+        );
     }
 
     #[test]
@@ -1038,49 +1093,65 @@ mod test {
 
     #[test]
     fn dagrange_returns_descendants_of_x_that_reach_y() {
-        let edges = Index::<_, Forwards>::new(vec![
-            (Rev(5), Rev(4)),
-            (Rev(4), Rev(3)),
-            (Rev(4), Rev(2)),
-            (Rev(3), Rev(1)),
+        let edges = Index::<_, Backwards>::new(vec![
+            (Rev(1), Rev(2)),
+            (Rev(2), Rev(3)),
+            (Rev(2), Rev(4)),
+            (Rev(3), Rev(5)),
+            (Rev(4), Rev(5)),
+            (Rev(8), Rev(9)),
+        ]);
+        let ancestors = Index::<_, Forwards>::new(vec![
             (Rev(2), Rev(1)),
+            (Rev(3), Rev(2)),
+            (Rev(4), Rev(2)),
+            (Rev(5), Rev(3)),
+            (Rev(5), Rev(4)),
             (Rev(9), Rev(8)),
         ]);
-        let x = Constant::<_, Forwards>::new(vec![Rev(4)]);
-        let y = Constant::<_, Forwards>::new(vec![Rev(1)]);
-        let mut range = x.range(y, &edges);
+        let x = Constant::<_, Forwards>::new(vec![Rev(2)]);
+        let y = Constant::<_, Forwards>::new(vec![Rev(5)]);
+        let mut range = x.range(y, &edges, &ancestors);
 
         assert_eq!(
             range.iter().collect::<Vec<_>>(),
-            vec![Rev(4), Rev(3), Rev(2), Rev(1)]
+            vec![Rev(5), Rev(4), Rev(3), Rev(2)]
         );
     }
 
     #[test]
     fn dagrange_accepts_any_input_ordering() {
-        let edges = Index::<_, Forwards>::new(vec![
-            (Rev(5), Rev(4)),
-            (Rev(4), Rev(3)),
-            (Rev(4), Rev(2)),
-            (Rev(3), Rev(1)),
-            (Rev(2), Rev(1)),
+        let edges = Index::<_, Backwards>::new(vec![
+            (Rev(1), Rev(2)),
+            (Rev(2), Rev(3)),
+            (Rev(2), Rev(4)),
+            (Rev(3), Rev(5)),
+            (Rev(4), Rev(5)),
         ]);
-        let x = Constant::<_, Backwards>::new(vec![Rev(4)]);
-        let y = Constant::<_, Unordered>::new(vec![Rev(1)]);
-        let mut range = x.range(y, &edges);
+        let ancestors = Index::<_, Forwards>::new(vec![
+            (Rev(2), Rev(1)),
+            (Rev(3), Rev(2)),
+            (Rev(4), Rev(2)),
+            (Rev(5), Rev(3)),
+            (Rev(5), Rev(4)),
+        ]);
+        let x = Constant::<_, Backwards>::new(vec![Rev(2)]);
+        let y = Constant::<_, Unordered>::new(vec![Rev(5)]);
+        let mut range = x.range(y, &edges, &ancestors);
 
         assert_eq!(
             range.iter().collect::<Vec<_>>(),
-            vec![Rev(4), Rev(3), Rev(2), Rev(1)]
+            vec![Rev(5), Rev(4), Rev(3), Rev(2)]
         );
     }
 
     #[test]
     fn dagrange_is_empty_when_y_is_not_below_x() {
-        let edges = Index::<_, Forwards>::new(vec![(Rev(5), Rev(4)), (Rev(3), Rev(2))]);
+        let edges = Index::<_, Backwards>::new(vec![(Rev(4), Rev(5)), (Rev(2), Rev(3))]);
+        let ancestors = Index::<_, Forwards>::new(vec![(Rev(5), Rev(4)), (Rev(3), Rev(2))]);
         let x = Constant::<_, Forwards>::new(vec![Rev(5)]);
         let y = Constant::<_, Forwards>::new(vec![Rev(2)]);
-        let mut range = x.range(y, &edges);
+        let mut range = x.range(y, &edges, &ancestors);
 
         assert_eq!(range.iter().collect::<Vec<_>>(), vec![]);
     }
