@@ -381,7 +381,11 @@ where
                     self.pending_i = 0;
                     for left_value in &left_group {
                         for right_value in &right_group {
-                            self.pending.push((key.clone(), left_value.clone(), right_value.clone()));
+                            self.pending.push((
+                                key.clone(),
+                                left_value.clone(),
+                                right_value.clone(),
+                            ));
                         }
                     }
                     return !self.pending.is_empty();
@@ -538,6 +542,12 @@ where
     }
 }
 
+// The algorithm for DagRange (x::y) is somewhat involved:
+// * first, eagerly compute both x and y, then compute min(gcn(x)) and max(gcn(y)).
+// * do an eager closure over x and Scan([max(gcn(y)), min(gcn(x))]) to arrive at x::
+// * build a reverse index I from the revs in x::
+// * do a closure over y and I
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -640,12 +650,7 @@ mod test {
             (Rev(2), "c"),
             (Rev(1), "d"),
         ]);
-        let right = Constant::new(vec![
-            (Rev(2), 10),
-            (Rev(2), 20),
-            (Rev(1), 30),
-            (Rev(0), 40),
-        ]);
+        let right = Constant::new(vec![(Rev(2), 10), (Rev(2), 20), (Rev(1), 30), (Rev(0), 40)]);
         let mut join = MergeJoin::new(left, right);
 
         assert_eq!(
