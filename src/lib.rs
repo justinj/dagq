@@ -603,7 +603,13 @@ impl<'a> Evaluator<'a> {
                 };
                 input.filter(value, relation)
             }
-            Expr::Range { lo: _, hi: _ } => unimplemented!(),
+            Expr::Range { lo, hi } => {
+                let lo = self.eval(*lo).data;
+                let hi = self.eval(*hi).data;
+                let descendants = self.eval(Expr::constant(lo).up(0, None));
+                let ancestors = self.eval(Expr::constant(hi).down(0, None));
+                Batch::intersection_all(vec![descendants, ancestors])
+            }
         }
     }
 }
@@ -742,7 +748,10 @@ impl Expr {
     }
 
     pub fn range(lo: Expr, hi: Expr) -> Expr {
-        lo.up(0, None).intersection(hi.down(0, None))
+        Expr::Range {
+            lo: Box::new(lo),
+            hi: Box::new(hi),
+        }
     }
 }
 
