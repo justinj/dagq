@@ -89,6 +89,84 @@ trait Operator<T, O: Ordering> {
             _marker: PhantomData,
         }
     }
+
+    fn closure<V>(self, edges: V) -> Closure<T, Self, V, O>
+    where
+        Self: Sized,
+        V: Operator<(T, T), O>,
+    {
+        Closure::new(self, edges)
+    }
+
+    fn map<U, F>(self, f: F) -> Map<T, U, Self, F, O>
+    where
+        Self: Sized,
+    {
+        Map::new(self, f)
+    }
+
+    fn filter<F>(self, predicate: F) -> Filter<T, Self, F, O>
+    where
+        Self: Sized,
+    {
+        Filter::new(self, predicate)
+    }
+
+    fn union<V>(self, right: V) -> Union<T, Self, V, O>
+    where
+        Self: Sized,
+        V: Operator<T, O>,
+    {
+        Union::new(self, right)
+    }
+
+    fn intersection<V>(self, right: V) -> Intersection<T, Self, V, O>
+    where
+        Self: Sized,
+        V: Operator<T, O>,
+    {
+        Intersection::new(self, right)
+    }
+
+    fn difference<V>(self, right: V) -> Difference<T, Self, V, O>
+    where
+        Self: Sized,
+        V: Operator<T, O>,
+    {
+        Difference::new(self, right)
+    }
+
+    fn ancestors<'a>(
+        self,
+        edges: &'a Index<(Rev, Rev), Forwards>,
+    ) -> Closure<Rev, Self, Scan<'a, (Rev, Rev), Forwards>, Forwards>
+    where
+        Self: Sized + Operator<Rev, Forwards>,
+    {
+        Closure::new(self, edges.cursor())
+    }
+
+    fn descendants<'a>(
+        self,
+        edges: &'a Index<(Rev, Rev), Backwards>,
+    ) -> Closure<Rev, Self, Scan<'a, (Rev, Rev), Backwards>, Backwards>
+    where
+        Self: Sized + Operator<Rev, Backwards>,
+    {
+        Closure::new(self, edges.cursor())
+    }
+
+    fn range<'a, Y, YO: Ordering>(
+        self,
+        y: Y,
+        edges: &'a Index<(Rev, Rev), Forwards>,
+    ) -> DagRange<'a, Self, Y, O, YO>
+    where
+        Self: Sized + Operator<Rev, O>,
+        Y: Operator<Rev, YO>,
+    {
+        DagRange::new(self, y, edges)
+    }
 }
 
 struct OperatorIter<'a, Op, T, O: Ordering>
@@ -615,6 +693,76 @@ where
     }
 }
 
+struct Difference<T, U, V, O: Ordering>
+where
+    U: Operator<T, O>,
+    V: Operator<T, O>,
+{
+    left: Buffered<T, U, O>,
+    right: Buffered<T, V, O>,
+    left_item: Option<T>,
+    right_item: Option<T>,
+    last: Option<T>,
+}
+
+impl<T, U, V, O: Ordering> Difference<T, U, V, O>
+where
+    U: Operator<T, O>,
+    V: Operator<T, O>,
+{
+    fn new(left: U, right: V) -> Self {
+        Self {
+            left: Buffered::new(left),
+            right: Buffered::new(right),
+            left_item: None,
+            right_item: None,
+            last: None,
+        }
+    }
+}
+
+impl<T, U, V, O: Ordering> Operator<T, O> for Difference<T, U, V, O>
+where
+    T: Ord + Clone,
+    U: Operator<T, O>,
+    V: Operator<T, O>,
+{
+    fn next(&mut self, batch: &mut Batch<T, O>) {
+        while batch.data.len() < SET_BATCH_SIZE {
+            if self.left_item.is_none() {
+                self.left_item = self.left.next_item();
+            }
+            if self.right_item.is_none() {
+                self.right_item = self.right.next_item();
+            }
+
+            let item = match (&self.left_item, &self.right_item) {
+                (Some(left), Some(right)) => match O::cmp(left, right) {
+                    std::cmp::Ordering::Less => self.left_item.take(),
+                    std::cmp::Ordering::Equal => {
+                        self.right_item = None;
+                        self.left_item = None;
+                        None
+                    }
+                    std::cmp::Ordering::Greater => {
+                        self.right_item = None;
+                        None
+                    }
+                },
+                (Some(_), None) => self.left_item.take(),
+                (None, _) => break,
+            };
+
+            if let Some(item) = item {
+                if self.last.as_ref() != Some(&item) {
+                    self.last = Some(item.clone());
+                    batch.data.push(item);
+                }
+            }
+        }
+    }
+}
+
 struct DagRange<'a, X, Y, XO: Ordering, YO: Ordering>
 where
     X: Operator<Rev, XO>,
@@ -817,6 +965,30 @@ mod test {
         assert_eq!(
             intersection.iter().collect::<Vec<_>>(),
             vec![Rev(3), Rev(4)]
+        );
+    }
+
+    #[test]
+    fn difference_returns_left_items_missing_from_right() {
+        let left = Constant::<_, Forwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
+        let right = Constant::<_, Forwards>::new(vec![Rev(6), Rev(4), Rev(2)]);
+        let mut difference: Difference<_, _, _, Forwards> = Difference::new(left, right);
+
+        assert_eq!(
+            difference.iter().collect::<Vec<_>>(),
+            vec![Rev(5), Rev(3), Rev(1)]
+        );
+    }
+
+    #[test]
+    fn difference_preserves_backwards_ordering() {
+        let left = Constant::<_, Backwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
+        let right = Constant::<_, Backwards>::new(vec![Rev(6), Rev(4), Rev(2)]);
+        let mut difference: Difference<_, _, _, Backwards> = Difference::new(left, right);
+
+        assert_eq!(
+            difference.iter().collect::<Vec<_>>(),
+            vec![Rev(1), Rev(3), Rev(5)]
         );
     }
 
