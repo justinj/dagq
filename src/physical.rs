@@ -904,7 +904,7 @@ mod test {
             (Rev(3), Rev(2)),
             (Rev(4), Rev(5)),
         ]);
-        let mut closure: Closure<_, _, _, Forwards> = Closure::new(start, edges);
+        let mut closure = start.closure(edges);
 
         assert_eq!(
             closure.iter().collect::<Vec<_>>(),
@@ -917,7 +917,7 @@ mod test {
         let start = Constant::<_, Forwards>::new(vec![Rev(2000)]);
         let edges =
             Constant::<_, Forwards>::new((1..=2000).map(|i| (Rev(i), Rev(i - 1))).collect());
-        let mut closure: Closure<_, _, _, Forwards> = Closure::new(start, edges);
+        let mut closure = start.closure(edges);
 
         let mut batch = Batch::new(Vec::new());
         closure.next(&mut batch);
@@ -936,7 +936,7 @@ mod test {
     fn union_merges_sorted_inputs() {
         let left = Constant::<_, Forwards>::new(vec![Rev(5), Rev(3), Rev(1)]);
         let right = Constant::<_, Forwards>::new(vec![Rev(4), Rev(3), Rev(2)]);
-        let mut union: Union<_, _, _, Forwards> = Union::new(left, right);
+        let mut union = left.union(right);
 
         assert_eq!(
             union.iter().collect::<Vec<_>>(),
@@ -948,7 +948,7 @@ mod test {
     fn intersection_returns_common_items() {
         let left = Constant::<_, Forwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(1)]);
         let right = Constant::<_, Forwards>::new(vec![Rev(6), Rev(4), Rev(3), Rev(2)]);
-        let mut intersection: Intersection<_, _, _, Forwards> = Intersection::new(left, right);
+        let mut intersection = left.intersection(right);
 
         assert_eq!(
             intersection.iter().collect::<Vec<_>>(),
@@ -960,7 +960,7 @@ mod test {
     fn intersection_preserves_backwards_ordering() {
         let left = Constant::<_, Backwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(1)]);
         let right = Constant::<_, Backwards>::new(vec![Rev(6), Rev(4), Rev(3), Rev(2)]);
-        let mut intersection: Intersection<_, _, _, Backwards> = Intersection::new(left, right);
+        let mut intersection = left.intersection(right);
 
         assert_eq!(
             intersection.iter().collect::<Vec<_>>(),
@@ -972,7 +972,7 @@ mod test {
     fn difference_returns_left_items_missing_from_right() {
         let left = Constant::<_, Forwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
         let right = Constant::<_, Forwards>::new(vec![Rev(6), Rev(4), Rev(2)]);
-        let mut difference: Difference<_, _, _, Forwards> = Difference::new(left, right);
+        let mut difference = left.difference(right);
 
         assert_eq!(
             difference.iter().collect::<Vec<_>>(),
@@ -984,7 +984,7 @@ mod test {
     fn difference_preserves_backwards_ordering() {
         let left = Constant::<_, Backwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
         let right = Constant::<_, Backwards>::new(vec![Rev(6), Rev(4), Rev(2)]);
-        let mut difference: Difference<_, _, _, Backwards> = Difference::new(left, right);
+        let mut difference = left.difference(right);
 
         assert_eq!(
             difference.iter().collect::<Vec<_>>(),
@@ -995,7 +995,7 @@ mod test {
     #[test]
     fn filter_keeps_matching_items() {
         let input = Constant::<_, Forwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
-        let mut filter: Filter<_, _, _, Forwards> = Filter::new(input, |rev: &Rev| rev.0 % 2 == 0);
+        let mut filter = input.filter(|rev: &Rev| rev.0 % 2 == 0);
 
         assert_eq!(filter.iter().collect::<Vec<_>>(), vec![Rev(4), Rev(2)]);
     }
@@ -1031,7 +1031,7 @@ mod test {
     #[test]
     fn map_transforms_items() {
         let input = Constant::<_, Forwards>::new(vec![Rev(3), Rev(2), Rev(1)]);
-        let mut map: Map<_, _, _, _, Forwards> = Map::new(input, |rev: Rev| rev.0);
+        let mut map = input.map(|rev: Rev| rev.0);
 
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![3, 2, 1]);
     }
@@ -1048,7 +1048,7 @@ mod test {
         ]);
         let x = Constant::<_, Forwards>::new(vec![Rev(4)]);
         let y = Constant::<_, Forwards>::new(vec![Rev(1)]);
-        let mut range = DagRange::new(x, y, &edges);
+        let mut range = x.range(y, &edges);
 
         assert_eq!(
             range.iter().collect::<Vec<_>>(),
@@ -1067,7 +1067,7 @@ mod test {
         ]);
         let x = Constant::<_, Backwards>::new(vec![Rev(4)]);
         let y = Constant::<_, Unordered>::new(vec![Rev(1)]);
-        let mut range = DagRange::new(x, y, &edges);
+        let mut range = x.range(y, &edges);
 
         assert_eq!(
             range.iter().collect::<Vec<_>>(),
@@ -1080,7 +1080,7 @@ mod test {
         let edges = Index::<_, Forwards>::new(vec![(Rev(5), Rev(4)), (Rev(3), Rev(2))]);
         let x = Constant::<_, Forwards>::new(vec![Rev(5)]);
         let y = Constant::<_, Forwards>::new(vec![Rev(2)]);
-        let mut range = DagRange::new(x, y, &edges);
+        let mut range = x.range(y, &edges);
 
         assert_eq!(range.iter().collect::<Vec<_>>(), vec![]);
     }
