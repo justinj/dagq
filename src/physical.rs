@@ -615,26 +615,28 @@ where
     }
 }
 
-struct DagRange<'a, X, Y>
+struct DagRange<'a, X, Y, XO: Ordering, YO: Ordering>
 where
-    X: Operator<Rev, Forwards>,
-    Y: Operator<Rev, Forwards>,
+    X: Operator<Rev, XO>,
+    Y: Operator<Rev, YO>,
 {
     x: Option<X>,
     y: Option<Y>,
     edges: &'a Index<(Rev, Rev), Forwards>,
+    _marker: PhantomData<(XO, YO)>,
 }
 
-impl<'a, X, Y> DagRange<'a, X, Y>
+impl<'a, X, Y, XO: Ordering, YO: Ordering> DagRange<'a, X, Y, XO, YO>
 where
-    X: Operator<Rev, Forwards>,
-    Y: Operator<Rev, Forwards>,
+    X: Operator<Rev, XO>,
+    Y: Operator<Rev, YO>,
 {
     fn new(x: X, y: Y, edges: &'a Index<(Rev, Rev), Forwards>) -> Self {
         Self {
             x: Some(x),
             y: Some(y),
             edges,
+            _marker: PhantomData,
         }
     }
 
@@ -701,10 +703,10 @@ where
     }
 }
 
-impl<X, Y> Operator<Rev, Forwards> for DagRange<'_, X, Y>
+impl<X, Y, XO: Ordering, YO: Ordering> Operator<Rev, Forwards> for DagRange<'_, X, Y, XO, YO>
 where
-    X: Operator<Rev, Forwards>,
-    Y: Operator<Rev, Forwards>,
+    X: Operator<Rev, XO>,
+    Y: Operator<Rev, YO>,
 {
     fn next(&mut self, batch: &mut Batch<Rev, Forwards>) {
         if self.x.is_none() {
@@ -874,6 +876,25 @@ mod test {
         ]);
         let x = Constant::<_, Forwards>::new(vec![Rev(4)]);
         let y = Constant::<_, Forwards>::new(vec![Rev(1)]);
+        let mut range = DagRange::new(x, y, &edges);
+
+        assert_eq!(
+            range.iter().collect::<Vec<_>>(),
+            vec![Rev(4), Rev(3), Rev(2), Rev(1)]
+        );
+    }
+
+    #[test]
+    fn dagrange_accepts_any_input_ordering() {
+        let edges = Index::<_, Forwards>::new(vec![
+            (Rev(5), Rev(4)),
+            (Rev(4), Rev(3)),
+            (Rev(4), Rev(2)),
+            (Rev(3), Rev(1)),
+            (Rev(2), Rev(1)),
+        ]);
+        let x = Constant::<_, Backwards>::new(vec![Rev(4)]);
+        let y = Constant::<_, Unordered>::new(vec![Rev(1)]);
         let mut range = DagRange::new(x, y, &edges);
 
         assert_eq!(
