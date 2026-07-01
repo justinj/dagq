@@ -38,6 +38,7 @@ pub(super) trait Ordering {
 }
 
 // Forwards = Child -> Parent
+#[derive(Debug)]
 pub(super) enum Forwards {}
 
 impl Ordering for Forwards {
@@ -51,6 +52,7 @@ impl Ordering for Forwards {
 }
 
 // Backwards = Parent -> Child
+#[derive(Debug)]
 pub(super) enum Backwards {}
 
 impl Ordering for Backwards {
@@ -301,39 +303,55 @@ struct RevRange<O: Ordering> {
     _marker: PhantomData<O>,
 }
 
-impl Default for RevRange<Forwards> {
+impl<O: Ordering> Default for RevRange<O> {
     fn default() -> Self {
         RevRange {
-            lower: Rev::MIN,
-            upper: Rev::MAX,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl Default for RevRange<Backwards> {
-    fn default() -> Self {
-        RevRange {
-            lower: Rev::MAX,
-            upper: Rev::MIN,
+            lower: O::min(Rev::MIN, Rev::MAX),
+            upper: O::max(Rev::MIN, Rev::MAX),
             _marker: PhantomData,
         }
     }
 }
 
 impl<O: Ordering> RevRange<O> {
-    fn union_with(&mut self, other: RevRange<O>) {
-        self.lower = O::min(self.lower, other.lower);
-        self.upper = O::max(self.upper, other.upper);
+    fn empty() -> Self {
+        RevRange {
+            lower: O::max(Rev::MIN, Rev::MAX),
+            upper: O::min(Rev::MIN, Rev::MAX),
+            _marker: PhantomData,
+        }
     }
 
-    fn intersect_with(&mut self, other: RevRange<O>) {
+    fn union(mut self, other: RevRange<O>) -> Self {
+        self.lower = O::min(self.lower, other.lower);
+        self.upper = O::max(self.upper, other.upper);
+        self
+    }
+
+    fn intersect(mut self, other: RevRange<O>) -> Self {
         self.lower = O::max(self.lower, other.lower);
         self.upper = O::min(self.upper, other.upper);
+        self
     }
 
     fn is_empty(&self) -> bool {
         O::cmp(&self.lower, &self.upper) == std::cmp::Ordering::Greater
+    }
+
+    fn open_upper(r: Rev) -> Self {
+        Self {
+            lower: r,
+            upper: O::max(Rev::MIN, Rev::MAX),
+            _marker: PhantomData,
+        }
+    }
+
+    fn open_lower(r: Rev) -> Self {
+        Self {
+            lower: O::min(Rev::MIN, Rev::MAX),
+            upper: r,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -341,6 +359,14 @@ pub(super) struct Scan<'a, T, O: Ordering> {
     index: &'a Index<T, O>,
     i: usize,
     end: Option<T>,
+}
+
+// TODO: idk this sort of sucks
+impl<'a, O: Ordering> Scan<'a, (Rev, Rev), O> {
+    fn constrain(mut self, range: RevRange<O>) -> Self {
+        self.with_start((range.lower, Rev::MIN))
+            .with_end((range.upper, Rev::MAX))
+    }
 }
 
 impl<'a, T: Ord, O: Ordering> Scan<'a, T, O> {
@@ -978,18 +1004,29 @@ where
         // that possibly matches the revs, so we constrain the scan to:
         //  [latest descendant, earliest ancestor]
         let mut ancestors: HashSet<_> = y_revs;
-        let lower_bound = ancestors.iter().min().copied().unwrap_or(Rev::MAX);
-
         let mut descendants: HashSet<_> = x_revs.iter().copied().collect();
-        let upper_bound = descendants.iter().max().copied().unwrap_or(Rev::MIN);
 
-        for (child, parent) in self
-            .ancestors
-            .scan()
-            .with_start((lower_bound, Rev::MIN))
-            .with_end((upper_bound, Rev::MAX))
+        // To figure out the range of the index we need to scan, we need to
+        // first get every ancestor and all of its potential descendants (via
+        // RevRange::open_upper) and union those, then do the same for every
+        // descendant and its potential ancestors (via RevRange::open_lower),
+        // then intersect the results.
+
+        let ancestor_range = ancestors
             .iter()
-        {
+            .fold(RevRange::<Forwards>::empty(), |r, &n| {
+                r.union(RevRange::open_upper(n))
+            });
+
+        let descendant_range = descendants
+            .iter()
+            .fold(RevRange::<Forwards>::empty(), |r, &n| {
+                r.union(RevRange::open_lower(n))
+            });
+
+        let scan_range = ancestor_range.intersect(descendant_range);
+
+        for (child, parent) in self.ancestors.scan().constrain(scan_range).iter() {
             rev_index.push((parent, child));
             if ancestors.contains(&child) {
                 ancestors.insert(parent);
