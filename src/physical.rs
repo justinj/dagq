@@ -1014,11 +1014,9 @@ where
         let head_range = heads.iter().fold(RevRange::<Forwards>::empty(), |r, &n| {
             r.union(RevRange::open_upper(n))
         });
-
         let root_range = roots.iter().fold(RevRange::<Forwards>::empty(), |r, &n| {
             r.union(RevRange::open_lower(n))
         });
-
         let scan_range = head_range.intersect(root_range);
 
         let mut ancestry = heads;

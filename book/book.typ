@@ -153,6 +153,8 @@ def ancestors(initial):
 == DAG Range
 
 One important operation over DAGs is *range*.
+The range between `x` and `y` is written `x::y` and is defined as `x::y` $equiv$ `x:: & ::y`.
+`x` is called the *roots* of the range, and `y` is called the *heads*.
 
 #block(breakable: false, grid(
   columns: (1fr, 1fr),
@@ -160,9 +162,9 @@ One important operation over DAGs is *range*.
   result("::p", ("p", "u", "v", "a", "b", "c", "z"),   color: colors.down),
 ))
 
-= `b::p`
-
 #align(center, result("b::p", ("b", "u", "v", "p")))
+
+You might find it helpful to read `x::y` as "`x` *up to* `y`."
 
 = Operators
 
