@@ -7,12 +7,28 @@ use std::{
 
 use reusable_iter::ReusableIntoIter;
 
+// TODO: there should be another trait that only Forwards and Backwards implement.
+
 pub(super) trait Ordering {
     type Reversed: Ordering;
 
     const SORTED: bool;
 
     fn cmp<T: Ord>(left: &T, right: &T) -> std::cmp::Ordering;
+
+    fn min<T: Ord>(left: T, right: T) -> T {
+        match Self::cmp(&left, &right) {
+            std::cmp::Ordering::Greater => right,
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => left,
+        }
+    }
+
+    fn max<T: Ord>(left: T, right: T) -> T {
+        match Self::cmp(&left, &right) {
+            std::cmp::Ordering::Greater => left,
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => right,
+        }
+    }
 
     fn sort<T: Ord>(data: &mut [T]) {
         if Self::SORTED {
@@ -74,6 +90,11 @@ impl<T, O: Ordering> Batch<T, O> {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Rev(pub(super) u32);
+
+impl Rev {
+    pub const MIN: Self = Rev(u32::MAX);
+    pub const MAX: Self = Rev(u32::MIN);
+}
 
 impl PartialOrd for Rev {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -156,7 +177,7 @@ pub(super) trait Operator<T, O: Ordering> {
     where
         Self: Sized + Operator<Rev, Forwards>,
     {
-        Closure::new(self, edges.cursor())
+        Closure::new(self, edges.scan())
     }
 
     fn descendants<'a>(
@@ -166,7 +187,7 @@ pub(super) trait Operator<T, O: Ordering> {
     where
         Self: Sized + Operator<Rev, Backwards>,
     {
-        Closure::new(self, edges.cursor())
+        Closure::new(self, edges.scan())
     }
 
     fn range<'a, Y, YO: Ordering>(
@@ -262,12 +283,57 @@ impl<T: Ord, O: Ordering> Index<T, O> {
         }
     }
 
-    pub(super) fn cursor(&self) -> Scan<'_, T, O> {
+    pub(super) fn scan(&self) -> Scan<'_, T, O> {
         Scan {
             index: self,
             i: 0,
             end: None,
         }
+    }
+}
+
+// RevRange represents a subarray of a Rev-ordered index. It is inclusive lower
+// and upper.
+#[derive(Debug)]
+struct RevRange<O: Ordering> {
+    lower: Rev,
+    upper: Rev,
+    _marker: PhantomData<O>,
+}
+
+impl Default for RevRange<Forwards> {
+    fn default() -> Self {
+        RevRange {
+            lower: Rev::MIN,
+            upper: Rev::MAX,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl Default for RevRange<Backwards> {
+    fn default() -> Self {
+        RevRange {
+            lower: Rev::MAX,
+            upper: Rev::MIN,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<O: Ordering> RevRange<O> {
+    fn union_with(&mut self, other: RevRange<O>) {
+        self.lower = O::min(self.lower, other.lower);
+        self.upper = O::max(self.upper, other.upper);
+    }
+
+    fn intersect_with(&mut self, other: RevRange<O>) {
+        self.lower = O::max(self.lower, other.lower);
+        self.upper = O::min(self.upper, other.upper);
+    }
+
+    fn is_empty(&self) -> bool {
+        O::cmp(&self.lower, &self.upper) == std::cmp::Ordering::Greater
     }
 }
 
@@ -871,6 +937,7 @@ where
     _marker: PhantomData<(XO, YO)>,
 }
 
+// x::y
 impl<'a, X, Y, XO: Ordering, YO: Ordering> DagRange<'a, X, Y, XO, YO>
 where
     X: Operator<Rev, XO>,
@@ -900,13 +967,30 @@ where
         };
 
         let mut x_revs: Vec<_> = x.iter().collect();
-        let y_revs: Vec<_> = y.iter().collect();
+        let y_revs: HashSet<_> = y.iter().collect();
         if x_revs.is_empty() || y_revs.is_empty() {
             return Batch::new(Vec::new());
         }
 
-        let mut ancestors: HashSet<_> = y_revs.into_iter().collect();
-        for &(child, parent) in &self.ancestors.data {
+        let mut rev_index = Vec::new();
+
+        // We want to constrain the scan such that we only look at the range
+        // that possibly matches the revs, so we constrain the scan to:
+        //  [latest descendant, earliest ancestor]
+        let mut ancestors: HashSet<_> = y_revs;
+        let lower_bound = ancestors.iter().min().copied().unwrap_or(Rev::MAX);
+
+        let mut descendants: HashSet<_> = x_revs.iter().copied().collect();
+        let upper_bound = descendants.iter().max().copied().unwrap_or(Rev::MIN);
+
+        for (child, parent) in self
+            .ancestors
+            .scan()
+            .with_start((lower_bound, Rev::MIN))
+            .with_end((upper_bound, Rev::MAX))
+            .iter()
+        {
+            rev_index.push((parent, child));
             if ancestors.contains(&child) {
                 ancestors.insert(parent);
             }
@@ -918,13 +1002,13 @@ where
             return Batch::new(Vec::new());
         }
 
-        let mut descendants = HashSet::new();
-        descendants.extend(x_revs.iter().copied());
-
         let mut result = Vec::new();
         let mut xi = 0;
 
-        for &(parent, child) in &self.descendants.data {
+        // Now we need to build a reverse index of parent -> child.
+        rev_index.sort_unstable_by(|a, b| b.cmp(a));
+
+        for &(parent, child) in &rev_index {
             if ancestors.contains(&child) && descendants.contains(&parent) {
                 if descendants.insert(child) {
                     while xi < x_revs.len()
@@ -980,7 +1064,7 @@ mod test {
     #[test]
     fn scan_reads_descending_range() {
         let index = Index::<_, Forwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
-        let mut scan = index.cursor().with_start(Rev(4)).with_end(Rev(2));
+        let mut scan = index.scan().with_start(Rev(4)).with_end(Rev(2));
         assert_eq!(
             scan.iter().collect::<Vec<_>>(),
             vec![Rev(4), Rev(3), Rev(2)]
