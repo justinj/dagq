@@ -78,17 +78,17 @@ mod tests {
 
     #[test]
     fn renders_revset_ast_to_physical_plan_and_results() {
-        // Graph:
+        // Graph, rendered like `jj log` with descendants above ancestors:
         //
-        //      0
-        //     / \
-        //    1   2
-        //     \ /
-        //      3
-        //     / \
-        //    4   5
-        //         \
         //          6
+        //          |
+        //      4   5
+        //       \ /
+        //        3
+        //       / \
+        //      1   2
+        //       \ /
+        //        0
         let indexes = Indexes::new(
             (0..=6).map(|i| (i.to_string(), Rev(i))),
             vec![
@@ -104,12 +104,12 @@ mod tests {
 
         let cases = [
             ("1 | 2", vec![Rev(2), Rev(1)]),
-            ("::6", vec![Rev(5), Rev(3), Rev(2), Rev(1), Rev(0)]),
-            ("0::", vec![Rev(6), Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]),
+            ("::6", vec![Rev(6), Rev(5), Rev(3), Rev(2), Rev(1), Rev(0)]),
+            ("0::", vec![Rev(6), Rev(5), Rev(4), Rev(3), Rev(2), Rev(1), Rev(0)]),
             ("3::6", vec![Rev(6), Rev(5), Rev(3)]),
             ("(1 | 4) | (2 | 4)", vec![Rev(4), Rev(2), Rev(1)]),
             ("0:: & (2 | 4 | 6)", vec![Rev(6), Rev(4), Rev(2)]),
-            ("0:: ~ (2 | 5)", vec![Rev(6), Rev(4), Rev(3), Rev(1)]),
+            ("0:: ~ (2 | 5)", vec![Rev(6), Rev(4), Rev(3), Rev(1), Rev(0)]),
         ];
 
         for (query, expected) in cases {

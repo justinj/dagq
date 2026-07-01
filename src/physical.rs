@@ -1,6 +1,6 @@
 mod reusable_iter;
 
-use std::{collections::HashSet, marker::PhantomData};
+use std::{collections::{HashSet, VecDeque}, marker::PhantomData};
 
 use reusable_iter::ReusableIntoIter;
 
@@ -318,6 +318,9 @@ where
     V: Operator<(T, T), O>,
 {
     u: Option<U>,
+    pending: VecDeque<T>,
+    pending_item: Option<T>,
+    edge_item: Option<T>,
     v: Buffered<(T, T), V, O>,
     set: HashSet<T>,
 }
@@ -330,6 +333,9 @@ where
     pub(super) fn new(u: U, v: V) -> Self {
         Self {
             u: Some(u),
+            pending: VecDeque::new(),
+            pending_item: None,
+            edge_item: None,
             v: Buffered::new(v),
             set: HashSet::new(),
         }
@@ -338,23 +344,45 @@ where
 
 impl<T, U, V, O: Ordering> Operator<T, O> for Closure<T, U, V, O>
 where
-    T: Eq + std::hash::Hash + Clone,
+    T: Eq + std::hash::Hash + Clone + Ord,
     U: Operator<T, O>,
     V: Operator<(T, T), O>,
 {
     fn next(&mut self, batch: &mut Batch<T, O>) {
         if let Some(mut start) = self.u.take() {
-            self.set.extend(start.iter());
+            for item in start.iter() {
+                self.set.insert(item.clone());
+                self.pending.push_back(item);
+            }
         }
 
         while batch.data.len() < CLOSURE_BATCH_SIZE {
-            let Some((from, to)) = self.v.next_item() else {
-                break;
-            };
-
-            if self.set.contains(&from) && self.set.insert(to.clone()) {
-                batch.data.push(to);
+            if self.pending_item.is_none() {
+                self.pending_item = self.pending.pop_front();
             }
+
+            if self.edge_item.is_none() {
+                loop {
+                    let Some((from, to)) = self.v.next_item() else { break };
+                    if self.set.contains(&from) && self.set.insert(to.clone()) {
+                        self.edge_item = Some(to);
+                        break;
+                    }
+                }
+            }
+
+            let item = match (&self.pending_item, &self.edge_item) {
+                (Some(p), Some(e)) => match O::cmp(p, e) {
+                    std::cmp::Ordering::Less | std::cmp::Ordering::Equal => {
+                        self.pending_item.take().unwrap()
+                    }
+                    std::cmp::Ordering::Greater => self.edge_item.take().unwrap(),
+                },
+                (Some(_), None) => self.pending_item.take().unwrap(),
+                (None, Some(_)) => self.edge_item.take().unwrap(),
+                (None, None) => break,
+            };
+            batch.data.push(item);
         }
     }
 }
@@ -967,7 +995,7 @@ mod test {
 
         assert_eq!(
             closure.iter().collect::<Vec<_>>(),
-            vec![Rev(2), Rev(1), Rev(0)]
+            vec![Rev(3), Rev(2), Rev(1), Rev(0)]
         );
     }
 
@@ -981,13 +1009,13 @@ mod test {
         let mut batch = Batch::new(Vec::new());
         closure.next(&mut batch);
         assert_eq!(batch.data.len(), CLOSURE_BATCH_SIZE);
-        assert_eq!(batch.data.first(), Some(&Rev(1999)));
-        assert_eq!(batch.data.last(), Some(&Rev(976)));
+        assert_eq!(batch.data.first(), Some(&Rev(2000)));
+        assert_eq!(batch.data.last(), Some(&Rev(977)));
 
         batch.data.clear();
         closure.next(&mut batch);
-        assert_eq!(batch.data.len(), 2000 - CLOSURE_BATCH_SIZE);
-        assert_eq!(batch.data.first(), Some(&Rev(975)));
+        assert_eq!(batch.data.len(), 2001 - CLOSURE_BATCH_SIZE);
+        assert_eq!(batch.data.first(), Some(&Rev(976)));
         assert_eq!(batch.data.last(), Some(&Rev(0)));
     }
 
