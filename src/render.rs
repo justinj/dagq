@@ -40,22 +40,26 @@ pub(super) fn render<'a>(ast: &RevsetExpr, indexes: &'a Indexes) -> BoxOperator<
                 .unwrap_or_else(|| panic!("unknown revision literal: {name}"));
             Box::new(Constant::<_, Forwards>::new(vec![rev]))
         }
-        RevsetExpr::Ancestors(input) => Box::new(render(input, indexes).ancestors(&indexes.ancestors)),
+        RevsetExpr::Ancestors(input) => {
+            Box::new(render(input, indexes).ancestors(&indexes.ancestors))
+        }
         RevsetExpr::Descendants(input) => Box::new(
             render(input, indexes)
                 .reverse()
                 .descendants(&indexes.descendants)
                 .reverse(),
         ),
-        RevsetExpr::Range(x, y) => Box::new(render(x, indexes).range(
-            render(y, indexes),
-            &indexes.descendants,
-            &indexes.ancestors,
-        )),
-        RevsetExpr::Union(left, right) => Box::new(render(left, indexes).union(render(right, indexes))),
-        RevsetExpr::Intersection(left, right) => Box::new(
-            render(left, indexes).intersection(render(right, indexes)),
+        RevsetExpr::Range(x, y) => Box::new(
+            render(x, indexes)
+                .range(render(y, indexes), &indexes.descendants, &indexes.ancestors)
+                .reverse(),
         ),
+        RevsetExpr::Union(left, right) => {
+            Box::new(render(left, indexes).union(render(right, indexes)))
+        }
+        RevsetExpr::Intersection(left, right) => {
+            Box::new(render(left, indexes).intersection(render(right, indexes)))
+        }
         RevsetExpr::Difference(left, right) => {
             Box::new(render(left, indexes).difference(render(right, indexes)))
         }

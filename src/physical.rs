@@ -858,7 +858,7 @@ where
         }
     }
 
-    fn compute(&mut self) -> Batch<Rev, Forwards> {
+    fn compute(&mut self) -> Batch<Rev, Backwards> {
         let Some(mut x) = self.x.take() else {
             return Batch::new(Vec::new());
         };
@@ -866,41 +866,56 @@ where
             return Batch::new(Vec::new());
         };
 
-        let x_revs: Vec<_> = x.iter().collect();
+        let mut x_revs: Vec<_> = x.iter().collect();
         let y_revs: Vec<_> = y.iter().collect();
         if x_revs.is_empty() || y_revs.is_empty() {
             return Batch::new(Vec::new());
         }
 
         let mut ancestors: HashSet<_> = y_revs.into_iter().collect();
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for &(child, parent) in &self.ancestors.data {
-                if ancestors.contains(&child) && ancestors.insert(parent) {
-                    changed = true;
+        for &(child, parent) in &self.ancestors.data {
+            if ancestors.contains(&child) {
+                ancestors.insert(parent);
+            }
+        }
+
+        x_revs.retain(|rev| ancestors.contains(rev));
+        Backwards::sort(&mut x_revs);
+        if x_revs.is_empty() {
+            return Batch::new(Vec::new());
+        }
+
+        let mut descendants = HashSet::new();
+        descendants.extend(x_revs.iter().copied());
+
+        let mut result = Vec::new();
+        let mut xi = 0;
+
+        for &(parent, child) in &self.descendants.data {
+            if ancestors.contains(&child) && descendants.contains(&parent) {
+                if descendants.insert(child) {
+                    while xi < x_revs.len()
+                        && Backwards::cmp(&x_revs[xi], &child) != std::cmp::Ordering::Greater
+                    {
+                        result.push(x_revs[xi]);
+                        xi += 1;
+                    }
+                    result.push(child);
                 }
             }
         }
 
-        let x_start = Constant::<_, Forwards>::new(x_revs.clone());
-        let x_descendants = Constant::<_, Backwards>::new(x_revs)
-            .descendants(self.descendants)
-            .reverse();
-        let mut range = x_start
-            .union(x_descendants)
-            .filter(|rev: &Rev| ancestors.contains(rev));
-
-        Batch::<Rev, Forwards>::new(range.iter().collect())
+        result.extend_from_slice(&x_revs[xi..]);
+        Batch::<Rev, Backwards>::new(result)
     }
 }
 
-impl<X, Y, XO: Ordering, YO: Ordering> Operator<Rev, Forwards> for DagRange<'_, X, Y, XO, YO>
+impl<X, Y, XO: Ordering, YO: Ordering> Operator<Rev, Backwards> for DagRange<'_, X, Y, XO, YO>
 where
     X: Operator<Rev, XO>,
     Y: Operator<Rev, YO>,
 {
-    fn next(&mut self, batch: &mut Batch<Rev, Forwards>) {
+    fn next(&mut self, batch: &mut Batch<Rev, Backwards>) {
         if self.x.is_none() {
             return;
         }
@@ -1115,7 +1130,7 @@ mod test {
 
         assert_eq!(
             range.iter().collect::<Vec<_>>(),
-            vec![Rev(5), Rev(4), Rev(3), Rev(2)]
+            vec![Rev(2), Rev(3), Rev(4), Rev(5)]
         );
     }
 
@@ -1141,7 +1156,29 @@ mod test {
 
         assert_eq!(
             range.iter().collect::<Vec<_>>(),
-            vec![Rev(5), Rev(4), Rev(3), Rev(2)]
+            vec![Rev(2), Rev(3), Rev(4), Rev(5)]
+        );
+    }
+
+    #[test]
+    fn dagrange_preserves_backwards_order_with_multiple_starts() {
+        let descendants = Index::<_, Backwards>::new(vec![
+            (Rev(1), Rev(2)),
+            (Rev(2), Rev(4)),
+            (Rev(3), Rev(4)),
+        ]);
+        let ancestors = Index::<_, Forwards>::new(vec![
+            (Rev(2), Rev(1)),
+            (Rev(4), Rev(2)),
+            (Rev(4), Rev(3)),
+        ]);
+        let x = Constant::<_, Backwards>::new(vec![Rev(1), Rev(3)]);
+        let y = Constant::<_, Backwards>::new(vec![Rev(4)]);
+        let mut range = x.range(y, &descendants, &ancestors);
+
+        assert_eq!(
+            range.iter().collect::<Vec<_>>(),
+            vec![Rev(1), Rev(2), Rev(3), Rev(4)]
         );
     }
 
