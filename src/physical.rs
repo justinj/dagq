@@ -1,6 +1,9 @@
 mod reusable_iter;
 
-use std::{collections::{HashSet, VecDeque}, marker::PhantomData};
+use std::{
+    collections::{HashSet, VecDeque},
+    marker::PhantomData,
+};
 
 use reusable_iter::ReusableIntoIter;
 
@@ -363,7 +366,9 @@ where
 
             if self.edge_item.is_none() {
                 loop {
-                    let Some((from, to)) = self.v.next_item() else { break };
+                    let Some((from, to)) = self.v.next_item() else {
+                        break;
+                    };
                     if self.set.contains(&from) && self.set.insert(to.clone()) {
                         self.edge_item = Some(to);
                         break;
@@ -1190,16 +1195,10 @@ mod test {
 
     #[test]
     fn dagrange_preserves_backwards_order_with_multiple_starts() {
-        let descendants = Index::<_, Backwards>::new(vec![
-            (Rev(1), Rev(2)),
-            (Rev(2), Rev(4)),
-            (Rev(3), Rev(4)),
-        ]);
-        let ancestors = Index::<_, Forwards>::new(vec![
-            (Rev(2), Rev(1)),
-            (Rev(4), Rev(2)),
-            (Rev(4), Rev(3)),
-        ]);
+        let descendants =
+            Index::<_, Backwards>::new(vec![(Rev(1), Rev(2)), (Rev(2), Rev(4)), (Rev(3), Rev(4))]);
+        let ancestors =
+            Index::<_, Forwards>::new(vec![(Rev(2), Rev(1)), (Rev(4), Rev(2)), (Rev(4), Rev(3))]);
         let x = Constant::<_, Backwards>::new(vec![Rev(1), Rev(3)]);
         let y = Constant::<_, Backwards>::new(vec![Rev(4)]);
         let mut range = x.range(y, &descendants, &ancestors);

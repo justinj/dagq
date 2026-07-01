@@ -86,7 +86,12 @@ impl RevsetExpr {
         }
     }
 
-    fn fmt_with_prec(&self, f: &mut fmt::Formatter<'_>, parent_prec: u8, side: Side) -> fmt::Result {
+    fn fmt_with_prec(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        parent_prec: u8,
+        side: Side,
+    ) -> fmt::Result {
         let prec = self.precedence();
         let needs_parens = prec < parent_prec || (side != Side::Root && prec == parent_prec);
         if needs_parens {
