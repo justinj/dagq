@@ -963,7 +963,7 @@ where
     _marker: PhantomData<(XO, YO)>,
 }
 
-// x::y
+// x::y. roots::heads.
 impl<'a, X, Y, XO: Ordering, YO: Ordering> DagRange<'a, X, Y, XO, YO>
 where
     X: Operator<Rev, XO>,
@@ -992,9 +992,9 @@ where
             return Batch::new(Vec::new());
         };
 
-        let mut x_revs: Vec<_> = x.iter().collect();
-        let y_revs: HashSet<_> = y.iter().collect();
-        if x_revs.is_empty() || y_revs.is_empty() {
+        let mut root_vec: Vec<_> = x.iter().collect();
+        let heads: HashSet<_> = y.iter().collect();
+        if root_vec.is_empty() || heads.is_empty() {
             return Batch::new(Vec::new());
         }
 
@@ -1003,39 +1003,36 @@ where
         // We want to constrain the scan such that we only look at the range
         // that possibly matches the revs, so we constrain the scan to:
         //  [latest descendant, earliest ancestor]
-        let mut ancestors: HashSet<_> = y_revs;
-        let mut descendants: HashSet<_> = x_revs.iter().copied().collect();
+        let mut roots: HashSet<_> = root_vec.iter().copied().collect();
 
         // To figure out the range of the index we need to scan, we need to
-        // first get every ancestor and all of its potential descendants (via
+        // first get every head and all of its potential ancestors (via
         // RevRange::open_upper) and union those, then do the same for every
-        // descendant and its potential ancestors (via RevRange::open_lower),
-        // then intersect the results.
+        // root and its potential descendants (via RevRange::open_lower), then
+        // intersect the results.
 
-        let ancestor_range = ancestors
-            .iter()
-            .fold(RevRange::<Forwards>::empty(), |r, &n| {
-                r.union(RevRange::open_upper(n))
-            });
+        let head_range = heads.iter().fold(RevRange::<Forwards>::empty(), |r, &n| {
+            r.union(RevRange::open_upper(n))
+        });
 
-        let descendant_range = descendants
-            .iter()
-            .fold(RevRange::<Forwards>::empty(), |r, &n| {
-                r.union(RevRange::open_lower(n))
-            });
+        let root_range = roots.iter().fold(RevRange::<Forwards>::empty(), |r, &n| {
+            r.union(RevRange::open_lower(n))
+        });
 
-        let scan_range = ancestor_range.intersect(descendant_range);
+        let scan_range = head_range.intersect(root_range);
+
+        let mut ancestry = heads;
 
         for (child, parent) in self.ancestors.scan().constrain(scan_range).iter() {
             rev_index.push((parent, child));
-            if ancestors.contains(&child) {
-                ancestors.insert(parent);
+            if ancestry.contains(&child) {
+                ancestry.insert(parent);
             }
         }
 
-        x_revs.retain(|rev| ancestors.contains(rev));
-        Backwards::sort(&mut x_revs);
-        if x_revs.is_empty() {
+        root_vec.retain(|rev| ancestry.contains(rev));
+        Backwards::sort(&mut root_vec);
+        if root_vec.is_empty() {
             return Batch::new(Vec::new());
         }
 
@@ -1046,12 +1043,12 @@ where
         rev_index.sort_unstable_by(|a, b| b.cmp(a));
 
         for &(parent, child) in &rev_index {
-            if ancestors.contains(&child) && descendants.contains(&parent) {
-                if descendants.insert(child) {
-                    while xi < x_revs.len()
-                        && Backwards::cmp(&x_revs[xi], &child) != std::cmp::Ordering::Greater
+            if ancestry.contains(&child) && roots.contains(&parent) {
+                if roots.insert(child) {
+                    while xi < root_vec.len()
+                        && Backwards::cmp(&root_vec[xi], &child) != std::cmp::Ordering::Greater
                     {
-                        result.push(x_revs[xi]);
+                        result.push(root_vec[xi]);
                         xi += 1;
                     }
                     result.push(child);
@@ -1059,7 +1056,7 @@ where
             }
         }
 
-        result.extend_from_slice(&x_revs[xi..]);
+        result.extend_from_slice(&root_vec[xi..]);
         Batch::<Rev, Backwards>::new(result)
     }
 }
