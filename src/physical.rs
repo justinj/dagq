@@ -90,12 +90,22 @@ impl<T, O: Ordering> Batch<T, O> {
     }
 }
 
+pub(super) trait Bounded: Copy {
+    const MIN: Self;
+    const MAX: Self;
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Rev(pub(super) u32);
 
 impl Rev {
     pub const MIN: Self = Rev(u32::MAX);
     pub const MAX: Self = Rev(u32::MIN);
+}
+
+impl Bounded for Rev {
+    const MIN: Self = Rev::MIN;
+    const MAX: Self = Rev::MAX;
 }
 
 impl PartialOrd for Rev {
@@ -195,12 +205,13 @@ pub(super) trait Operator<T, O: Ordering> {
     fn range<'a, Y, YO: Ordering>(
         self,
         y: Y,
-        descendants: &'a Index<(Rev, Rev), Backwards>,
-        ancestors: &'a Index<(Rev, Rev), Forwards>,
-    ) -> DagRange<'a, Self, Y, O, YO>
+        descendants: &'a Index<(T, T), Backwards>,
+        ancestors: &'a Index<(T, T), Forwards>,
+    ) -> DagRange<'a, T, Self, Y, O, YO>
     where
-        Self: Sized + Operator<Rev, O>,
-        Y: Operator<Rev, YO>,
+        Self: Sized,
+        Y: Operator<T, YO>,
+        T: Bounded + Eq + std::hash::Hash + Ord,
     {
         DagRange::new(self, y, descendants, ancestors)
     }
@@ -294,41 +305,41 @@ impl<T: Ord, O: Ordering> Index<T, O> {
     }
 }
 
-// RevRange represents a subarray of a Rev-ordered index. It is inclusive lower
+// ValueRange represents a subarray of an ordered index. It is inclusive lower
 // and upper.
 #[derive(Debug)]
-struct RevRange<O: Ordering> {
-    lower: Rev,
-    upper: Rev,
+struct ValueRange<T, O: Ordering> {
+    lower: T,
+    upper: T,
     _marker: PhantomData<O>,
 }
 
-impl<O: Ordering> Default for RevRange<O> {
+impl<T: Bounded + Ord, O: Ordering> Default for ValueRange<T, O> {
     fn default() -> Self {
-        RevRange {
-            lower: O::min(Rev::MIN, Rev::MAX),
-            upper: O::max(Rev::MIN, Rev::MAX),
+        ValueRange {
+            lower: O::min(T::MIN, T::MAX),
+            upper: O::max(T::MIN, T::MAX),
             _marker: PhantomData,
         }
     }
 }
 
-impl<O: Ordering> RevRange<O> {
+impl<T: Bounded + Ord, O: Ordering> ValueRange<T, O> {
     fn empty() -> Self {
-        RevRange {
-            lower: O::max(Rev::MIN, Rev::MAX),
-            upper: O::min(Rev::MIN, Rev::MAX),
+        ValueRange {
+            lower: O::max(T::MIN, T::MAX),
+            upper: O::min(T::MIN, T::MAX),
             _marker: PhantomData,
         }
     }
 
-    fn union(mut self, other: RevRange<O>) -> Self {
+    fn union(mut self, other: ValueRange<T, O>) -> Self {
         self.lower = O::min(self.lower, other.lower);
         self.upper = O::max(self.upper, other.upper);
         self
     }
 
-    fn intersect(mut self, other: RevRange<O>) -> Self {
+    fn intersect(mut self, other: ValueRange<T, O>) -> Self {
         self.lower = O::max(self.lower, other.lower);
         self.upper = O::min(self.upper, other.upper);
         self
@@ -338,17 +349,17 @@ impl<O: Ordering> RevRange<O> {
         O::cmp(&self.lower, &self.upper) == std::cmp::Ordering::Greater
     }
 
-    fn open_upper(r: Rev) -> Self {
+    fn open_upper(r: T) -> Self {
         Self {
             lower: r,
-            upper: O::max(Rev::MIN, Rev::MAX),
+            upper: O::max(T::MIN, T::MAX),
             _marker: PhantomData,
         }
     }
 
-    fn open_lower(r: Rev) -> Self {
+    fn open_lower(r: T) -> Self {
         Self {
-            lower: O::min(Rev::MIN, Rev::MAX),
+            lower: O::min(T::MIN, T::MAX),
             upper: r,
             _marker: PhantomData,
         }
@@ -362,10 +373,10 @@ pub(super) struct Scan<'a, T, O: Ordering> {
 }
 
 // TODO: idk this sort of sucks
-impl<'a, O: Ordering> Scan<'a, (Rev, Rev), O> {
-    fn constrain(mut self, range: RevRange<O>) -> Self {
-        self.with_start((range.lower, Rev::MIN))
-            .with_end((range.upper, Rev::MAX))
+impl<'a, T: Bounded + Ord, O: Ordering> Scan<'a, (T, T), O> {
+    fn constrain(self, range: ValueRange<T, O>) -> Self {
+        self.with_start((range.lower, T::MIN))
+            .with_end((range.upper, T::MAX))
     }
 }
 
@@ -951,29 +962,31 @@ where
     }
 }
 
-pub(super) struct DagRange<'a, X, Y, XO: Ordering, YO: Ordering>
+pub(super) struct DagRange<'a, T, X, Y, XO: Ordering, YO: Ordering>
 where
-    X: Operator<Rev, XO>,
-    Y: Operator<Rev, YO>,
+    T: Bounded + Eq + std::hash::Hash + Ord,
+    X: Operator<T, XO>,
+    Y: Operator<T, YO>,
 {
     x: Option<X>,
     y: Option<Y>,
-    descendants: &'a Index<(Rev, Rev), Backwards>,
-    ancestors: &'a Index<(Rev, Rev), Forwards>,
+    descendants: &'a Index<(T, T), Backwards>,
+    ancestors: &'a Index<(T, T), Forwards>,
     _marker: PhantomData<(XO, YO)>,
 }
 
 // x::y. roots::heads.
-impl<'a, X, Y, XO: Ordering, YO: Ordering> DagRange<'a, X, Y, XO, YO>
+impl<'a, T, X, Y, XO: Ordering, YO: Ordering> DagRange<'a, T, X, Y, XO, YO>
 where
-    X: Operator<Rev, XO>,
-    Y: Operator<Rev, YO>,
+    T: Bounded + Eq + std::hash::Hash + Ord,
+    X: Operator<T, XO>,
+    Y: Operator<T, YO>,
 {
     pub(super) fn new(
         x: X,
         y: Y,
-        descendants: &'a Index<(Rev, Rev), Backwards>,
-        ancestors: &'a Index<(Rev, Rev), Forwards>,
+        descendants: &'a Index<(T, T), Backwards>,
+        ancestors: &'a Index<(T, T), Forwards>,
     ) -> Self {
         Self {
             x: Some(x),
@@ -984,7 +997,7 @@ where
         }
     }
 
-    fn compute(&mut self) -> Batch<Rev, Backwards> {
+    fn compute(&mut self) -> Batch<T, Backwards> {
         let Some(mut x) = self.x.take() else {
             return Batch::new(Vec::new());
         };
@@ -1007,15 +1020,15 @@ where
 
         // To figure out the range of the index we need to scan, we need to
         // first get every head and all of its potential ancestors (via
-        // RevRange::open_upper) and union those, then do the same for every
-        // root and its potential descendants (via RevRange::open_lower), then
+        // ValueRange::open_upper) and union those, then do the same for every
+        // root and its potential descendants (via ValueRange::open_lower), then
         // intersect the results.
 
-        let head_range = heads.iter().fold(RevRange::<Forwards>::empty(), |r, &n| {
-            r.union(RevRange::open_upper(n))
+        let head_range = heads.iter().fold(ValueRange::<T, Forwards>::empty(), |r, &n| {
+            r.union(ValueRange::open_upper(n))
         });
-        let root_range = roots.iter().fold(RevRange::<Forwards>::empty(), |r, &n| {
-            r.union(RevRange::open_lower(n))
+        let root_range = roots.iter().fold(ValueRange::<T, Forwards>::empty(), |r, &n| {
+            r.union(ValueRange::open_lower(n))
         });
         let scan_range = head_range.intersect(root_range);
 
@@ -1055,16 +1068,17 @@ where
         }
 
         result.extend_from_slice(&root_vec[xi..]);
-        Batch::<Rev, Backwards>::new(result)
+        Batch::<T, Backwards>::new(result)
     }
 }
 
-impl<X, Y, XO: Ordering, YO: Ordering> Operator<Rev, Backwards> for DagRange<'_, X, Y, XO, YO>
+impl<T, X, Y, XO: Ordering, YO: Ordering> Operator<T, Backwards> for DagRange<'_, T, X, Y, XO, YO>
 where
-    X: Operator<Rev, XO>,
-    Y: Operator<Rev, YO>,
+    T: Bounded + Eq + std::hash::Hash + Ord,
+    X: Operator<T, XO>,
+    Y: Operator<T, YO>,
 {
-    fn next(&mut self, batch: &mut Batch<Rev, Backwards>) {
+    fn next(&mut self, batch: &mut Batch<T, Backwards>) {
         if self.x.is_none() {
             return;
         }
@@ -1282,6 +1296,7 @@ mod test {
             vec![Rev(2), Rev(3), Rev(4), Rev(5)]
         );
     }
+
 
     #[test]
     fn dagrange_accepts_any_input_ordering() {
