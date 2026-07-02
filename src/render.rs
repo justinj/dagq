@@ -69,6 +69,12 @@ pub(super) fn render<'a>(ast: &RevsetExpr, indexes: &'a Indexes) -> BoxOperator<
             };
             Box::new(Heads::new(render(arg, indexes), &indexes.ancestors))
         }
+        RevsetExpr::Function { name, args } if name == "roots" => {
+            let [arg] = args.as_slice() else {
+                panic!("roots() expects exactly one argument");
+            };
+            Box::new(Heads::new(render(arg, indexes).reverse(), &indexes.descendants).reverse())
+        }
         RevsetExpr::Function { name, .. } => panic!("unknown revset function: {name}"),
     }
 }
@@ -121,6 +127,8 @@ mod tests {
                 vec![Rev(6), Rev(4), Rev(3), Rev(1), Rev(0)],
             ),
             ("heads(0::)", vec![Rev(6), Rev(4)]),
+            ("roots(::6)", vec![Rev(0)]),
+            ("roots(1 | 3 | 4)", vec![Rev(1)]),
         ];
 
         for (query, expected) in cases {
