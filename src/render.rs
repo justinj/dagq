@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::lang::RevsetExpr;
-use crate::physical::{Backwards, BoxOperator, Constant, Forwards, Index, Operator, Rev};
+use crate::physical::{Backwards, BoxOperator, Constant, Forwards, Heads, Index, Operator, Rev};
 
 pub(super) struct Indexes {
     names: HashMap<String, Rev>,
@@ -63,6 +63,12 @@ pub(super) fn render<'a>(ast: &RevsetExpr, indexes: &'a Indexes) -> BoxOperator<
         RevsetExpr::Difference(left, right) => {
             Box::new(render(left, indexes).difference(render(right, indexes)))
         }
+        RevsetExpr::Function { name, args } if name == "heads" => {
+            let [arg] = args.as_slice() else {
+                panic!("heads() expects exactly one argument");
+            };
+            Box::new(Heads::new(render(arg, indexes), &indexes.ancestors))
+        }
         RevsetExpr::Function { name, .. } => panic!("unknown revset function: {name}"),
     }
 }
@@ -114,6 +120,7 @@ mod tests {
                 "0:: ~ (2 | 5)",
                 vec![Rev(6), Rev(4), Rev(3), Rev(1), Rev(0)],
             ),
+            ("heads(0::)", vec![Rev(6), Rev(4)]),
         ];
 
         for (query, expected) in cases {

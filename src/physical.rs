@@ -6,6 +6,7 @@ use std::{
 };
 
 use reusable_iter::ReusableIntoIter;
+use smallvec::SmallVec;
 
 // TODO: there should be another trait that only Forwards and Backwards implement.
 
@@ -90,7 +91,7 @@ impl<T, O: Ordering> Batch<T, O> {
     }
 }
 
-pub(super) trait Bounded: Copy {
+pub(super) trait Bounded: Ord + Copy {
     const MIN: Self;
     const MAX: Self;
 }
@@ -400,6 +401,7 @@ impl<'a, T: Ord, O: Ordering> Scan<'a, T, O> {
 }
 
 const SCAN_BATCH_SIZE: usize = 1024;
+const HEADS_BATCH_SIZE: usize = 1024;
 const CLOSURE_BATCH_SIZE: usize = 1024;
 const SET_BATCH_SIZE: usize = 1024;
 
@@ -962,6 +964,106 @@ where
     }
 }
 
+struct ParentScan<'a, T, O>
+where
+    T: Copy + Ord,
+    O: Ordering,
+{
+    scan: Buffered<(T, T), Scan<'a, (T, T), O>, O>,
+    item: Option<(T, T)>,
+}
+
+// Scan for iterating parents of an ordered RevSet.
+impl<'a, T, O> ParentScan<'a, T, O>
+where
+    T: Copy + Ord,
+    O: Ordering,
+{
+    fn new(index: &'a Index<(T, T), O>) -> Self {
+        Self {
+            scan: Buffered::new(index.scan()),
+            item: None,
+        }
+    }
+
+    fn parents(&mut self, child: T) -> SmallVec<[T; 3]> {
+        let mut parents = SmallVec::new();
+        loop {
+            if self.item.is_none() {
+                self.item = self.scan.next_item();
+            }
+
+            let Some((scan_child, parent)) = self.item else {
+                break;
+            };
+
+            match O::cmp(&scan_child, &child) {
+                std::cmp::Ordering::Less => {
+                    self.item = None;
+                }
+                std::cmp::Ordering::Equal => {
+                    parents.push(parent);
+                    self.item = None;
+                }
+                std::cmp::Ordering::Greater => break,
+            }
+        }
+        parents
+    }
+}
+
+pub struct Heads<'a, T, X, O>
+where
+    T: Bounded,
+    O: Ordering,
+    X: Operator<T, O>,
+{
+    x: Buffered<T, X, O>,
+    parents: ParentScan<'a, T, O>,
+    seen: HashSet<T>,
+    heads: HashSet<T>,
+}
+
+impl<'a, T, X, O> Heads<'a, T, X, O>
+where
+    T: Bounded,
+    X: Operator<T, O>,
+    O: Ordering,
+{
+    pub(super) fn new(x: X, index: &'a Index<(T, T), O>) -> Self {
+        Heads {
+            x: Buffered::new(x),
+            parents: ParentScan::new(index),
+            seen: HashSet::new(),
+            heads: HashSet::new(),
+        }
+    }
+}
+
+impl<'a, T, X, O> Operator<T, O> for Heads<'a, T, X, O>
+where
+    T: Bounded + std::hash::Hash,
+    X: Operator<T, O>,
+    O: Ordering,
+{
+    fn next(&mut self, batch: &mut Batch<T, O>) {
+        while batch.data.len() < HEADS_BATCH_SIZE {
+            let Some(next_x) = self.x.next_item() else {
+                return;
+            };
+            if self.seen.insert(next_x) && self.heads.insert(next_x) {
+                batch.data.push(next_x);
+            }
+
+            for xp in self.parents.parents(next_x) {
+                // TODO: should we restrict this to x? we'd have to buffer all
+                // of x in order to.
+                self.seen.insert(xp);
+            }
+        }
+    }
+}
+
 pub(super) struct DagRange<'a, T, X, Y, XO: Ordering, YO: Ordering>
 where
     T: Bounded + Eq + std::hash::Hash + Ord,
@@ -1024,12 +1126,16 @@ where
         // root and its potential descendants (via ValueRange::open_lower), then
         // intersect the results.
 
-        let head_range = heads.iter().fold(ValueRange::<T, Forwards>::empty(), |r, &n| {
-            r.union(ValueRange::open_upper(n))
-        });
-        let root_range = roots.iter().fold(ValueRange::<T, Forwards>::empty(), |r, &n| {
-            r.union(ValueRange::open_lower(n))
-        });
+        let head_range = heads
+            .iter()
+            .fold(ValueRange::<T, Forwards>::empty(), |r, &n| {
+                r.union(ValueRange::open_upper(n))
+            });
+        let root_range = roots
+            .iter()
+            .fold(ValueRange::<T, Forwards>::empty(), |r, &n| {
+                r.union(ValueRange::open_lower(n))
+            });
         let scan_range = head_range.intersect(root_range);
 
         let mut ancestry = heads;
@@ -1270,6 +1376,20 @@ mod test {
     }
 
     #[test]
+    fn heads_returns_items_that_are_not_parents_of_other_input_items() {
+        let x = Constant::<_, Forwards>::new(vec![Rev(5), Rev(4), Rev(3), Rev(2), Rev(1)]);
+        let parents = Index::<_, Forwards>::new(vec![
+            (Rev(6), Rev(5)),
+            (Rev(5), Rev(4)),
+            (Rev(5), Rev(3)),
+            (Rev(4), Rev(2)),
+        ]);
+        let mut heads = Heads::new(x, &parents);
+
+        assert_eq!(heads.iter().collect::<Vec<_>>(), vec![Rev(5), Rev(1)]);
+    }
+
+    #[test]
     fn dagrange_returns_descendants_of_x_that_reach_y() {
         let edges = Index::<_, Backwards>::new(vec![
             (Rev(1), Rev(2)),
@@ -1296,7 +1416,6 @@ mod test {
             vec![Rev(2), Rev(3), Rev(4), Rev(5)]
         );
     }
-
 
     #[test]
     fn dagrange_accepts_any_input_ordering() {
