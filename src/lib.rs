@@ -4,6 +4,7 @@ use std::fmt::{self, Write as _};
 
 pub mod lang;
 mod physical;
+mod planner;
 mod render;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
