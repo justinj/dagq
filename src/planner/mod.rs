@@ -589,6 +589,9 @@ impl Expr {
 }
 
 #[cfg(test)]
+mod lang_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

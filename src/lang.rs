@@ -43,6 +43,29 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LowerError {
+    InvalidLiteral(String),
+    UnsupportedDifference,
+    UnsupportedFunction(String),
+}
+
+impl fmt::Display for LowerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LowerError::InvalidLiteral(literal) => write!(f, "invalid literal {literal:?}"),
+            LowerError::UnsupportedDifference => {
+                f.write_str("set difference is not supported by the planner IR")
+            }
+            LowerError::UnsupportedFunction(name) => {
+                write!(f, "function {name:?} is not supported by the planner IR")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LowerError {}
+
 impl std::str::FromStr for RevsetExpr {
     type Err = ParseError;
 
@@ -59,6 +82,50 @@ pub fn parse(input: &str) -> Result<RevsetExpr, ParseError> {
         return Err(parser.error("unexpected token"));
     }
     Ok(expr)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn lower_to_planner(expr: &RevsetExpr) -> Result<crate::planner::Expr, LowerError> {
+    use crate::planner::{Expr, Predicate, Vx};
+
+    match expr {
+        RevsetExpr::Literal(literal) => {
+            let vx = literal
+                .parse::<usize>()
+                .map_err(|_| LowerError::InvalidLiteral(literal.clone()))?;
+            Ok(Expr::constant(vec![Vx(vx)]))
+        }
+        RevsetExpr::Union(lhs, rhs) => Ok(lower_to_planner(lhs)?.union(lower_to_planner(rhs)?)),
+        RevsetExpr::Intersection(lhs, rhs) => {
+            Ok(lower_to_planner(lhs)?.intersection(lower_to_planner(rhs)?))
+        }
+        RevsetExpr::Difference(_, _) => Err(LowerError::UnsupportedDifference),
+        RevsetExpr::Ancestors(expr) => Ok(lower_to_planner(expr)?.down(0, None)),
+        RevsetExpr::Descendants(expr) => Ok(lower_to_planner(expr)?.up(0, None)),
+        RevsetExpr::Range(lhs, rhs) => {
+            Ok(Expr::range(lower_to_planner(lhs)?, lower_to_planner(rhs)?))
+        }
+        RevsetExpr::Function { name, args } if name == "author" && args.len() == 1 => {
+            let RevsetExpr::Literal(author) = &args[0] else {
+                return Err(LowerError::UnsupportedFunction(name.clone()));
+            };
+            Ok(Expr::All.filter(vec![Predicate::Author(author.clone())]))
+        }
+        RevsetExpr::Function { name, args } if name == "description" && args.len() == 1 => {
+            let RevsetExpr::Literal(description) = &args[0] else {
+                return Err(LowerError::UnsupportedFunction(name.clone()));
+            };
+            Ok(Expr::All.filter(vec![Predicate::Description(description.clone())]))
+        }
+        RevsetExpr::Function { name, .. } => Err(LowerError::UnsupportedFunction(name.clone())),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_and_lower_to_planner(
+    input: &str,
+) -> Result<crate::planner::Expr, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    Ok(lower_to_planner(&parse(input)?)?)
 }
 
 impl fmt::Display for RevsetExpr {
