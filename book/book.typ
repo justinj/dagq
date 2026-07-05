@@ -176,3 +176,20 @@ You might find it helpful to read `x::y` as "`x` *up to* `y`."
 
 - `::a | ::b` $equiv$ `::(a | b)`
 - `a:: | b::` $equiv$ `(a | b)::`
+
+= Range Thoughts
+
+`a::b` is `a:: & ::b`. And in general,
+
+`a1:: & ... & an:: & ::b1 & ... ::bm` is
+
+```
+  a1::b1 & ... & a1::bm
+& a2::b1 & ... & a2::bm
+...
+& an::b1 & ... & an::bm
+```
+
+But this would result in duplicating a bunch of the inputs, so for now I'm going
+to ignore that, and if there's exactly one up and one down I'll turn them into a
+range.

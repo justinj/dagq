@@ -13,6 +13,11 @@ impl Vx {
 }
 
 #[derive(Debug, Clone)]
+pub enum Predicate {
+    Author(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     None,
     All,
@@ -39,8 +44,7 @@ pub enum Expr {
     Intersection(Vec<Expr>),
     Filter {
         input: Box<Expr>,
-        label: String,
-        value: String,
+        preds: Vec<Predicate>,
     },
 }
 
@@ -54,6 +58,22 @@ impl Expr {
             v
         } else {
             panic!("attempted to unwrap_constant non-constant")
+        }
+    }
+
+    fn unwrap_up(self) -> (Box<Expr>, usize, Option<usize>) {
+        if let Expr::Up { input, lo, hi } = self {
+            (input, lo, hi)
+        } else {
+            panic!("attempted to unwrap_up non-up")
+        }
+    }
+
+    fn unwrap_down(self) -> (Box<Expr>, usize, Option<usize>) {
+        if let Expr::Down { input, lo, hi } = self {
+            (input, lo, hi)
+        } else {
+            panic!("attempted to unwrap_down non-down")
         }
     }
 }
@@ -77,7 +97,6 @@ pub struct RewriteRules {
     pub fold_down_down: bool,
     pub flatten_union: bool,
     pub flatten_intersection: bool,
-    pub intersection_to_filter: bool,
 }
 
 impl RewriteRules {
@@ -87,7 +106,6 @@ impl RewriteRules {
             fold_down_down: true,
             flatten_union: true,
             flatten_intersection: true,
-            intersection_to_filter: true,
         }
     }
 
@@ -97,7 +115,6 @@ impl RewriteRules {
             fold_down_down: false,
             flatten_union: false,
             flatten_intersection: false,
-            intersection_to_filter: false,
         }
     }
 }
@@ -275,46 +292,85 @@ impl Planner {
                     }
                 }
 
-                if self.rules.intersection_to_filter {
-                    if inputs.iter().any(|input| {
-                        matches!(
-                            input,
-                            Expr::Filter { input, .. }
-                                if matches!(input.as_ref(), Expr::All)
-                        )
-                    }) {
-                        let (hoisted_filters, base_inputs): (Vec<_>, Vec<_>) =
-                            inputs.into_iter().partition(|input| {
-                                matches!(
-                                    input,
-                                    Expr::Filter { input, .. }
-                                        if matches!(input.as_ref(), Expr::All)
-                                )
-                            });
+                if inputs.iter().any(|e| matches!(e, Expr::None)) {
+                    return Expr::None;
+                }
 
-                        let mut expr = Expr::Intersection(base_inputs).optimize(self);
+                let before_len = inputs.len();
+                inputs.retain(|e| !matches!(e, Expr::All));
+                if before_len != inputs.len() {
+                    return Expr::Intersection(inputs).optimize(self);
+                }
 
-                        for filter in hoisted_filters {
-                            let Expr::Filter { label, value, .. } = filter else {
-                                unreachable!();
-                            };
-                            expr = expr.filter(label, value);
+                // TODO: figure out a cleaner way for this
+                let cmp = |u| match u {
+                    &Expr::Constant(_) => 0,
+                    &Expr::Up { .. } => 1,
+                    &Expr::Down { .. } => 2,
+                    _ => i32::MAX,
+                };
+                if !inputs.is_sorted_by_key(cmp) {
+                    inputs.sort_by_key(|u| match u {
+                        &Expr::Constant(_) => 0,
+                        &Expr::Up { .. } => 1,
+                        &Expr::Down { .. } => 2,
+                        _ => i32::MAX,
+                    });
+                    return Expr::Intersection(inputs).optimize(self);
+                }
+
+                if inputs.len() > 1 && matches!(inputs[1], Expr::Constant(_)) {
+                    let mut result = inputs[0].take().unwrap_constant();
+                    let mut i = 1;
+                    while i < inputs.len()
+                        && let Expr::Constant(vs) = &inputs[i]
+                    {
+                        i += 1;
+                        // TODO: hashset?
+                        result.retain(|v| vs.contains(v))
+                    }
+                    let mut new_intersection = vec![Expr::Constant(result)];
+                    new_intersection.extend((i..inputs.len()).map(|i| inputs[i].take()));
+                    return Expr::Intersection(new_intersection).optimize(self);
+                }
+
+                // Merge a single up and a single down into a range.
+                {
+                    let mut ups = 0;
+                    let mut downs = 0;
+                    for e in &inputs {
+                        match e {
+                            Expr::Up {
+                                lo: 0, hi: None, ..
+                            } => ups += 1,
+                            Expr::Down {
+                                lo: 0, hi: None, ..
+                            } => downs += 1,
+                            _ => {}
                         }
+                    }
 
-                        return expr;
+                    if ups == 1 && downs == 1 {
+                        let (mut ud, mut inputs): (Vec<_>, _) = inputs
+                            .into_iter()
+                            .partition(|e| matches!(e, Expr::Up { .. } | Expr::Down { .. }));
+                        let (mut up, mut down) = (ud[0].take(), ud[1].take());
+                        if matches!(up, Expr::Down { .. }) {
+                            (up, down) = (down, up)
+                        }
+                        inputs.push(Expr::Range {
+                            lo: up.unwrap_up().0,
+                            hi: down.unwrap_down().0,
+                        });
+                        return Expr::Intersection(inputs).optimize(self);
                     }
                 }
 
                 Expr::Intersection(inputs)
             }
-            Expr::Filter {
-                input,
-                label,
-                value,
-            } => Expr::Filter {
+            Expr::Filter { input, preds } => Expr::Filter {
                 input: Box::new(self.optimize(*input)),
-                label,
-                value,
+                preds,
             },
         }
     }
@@ -371,14 +427,10 @@ impl Expr {
                 let method_pad = "  ".repeat(indent + 1);
                 writeln!(out, "{}.down({}, {})", method_pad, lo, fmt_hi(*hi))
             }
-            Expr::Filter {
-                input,
-                label,
-                value,
-            } => {
+            Expr::Filter { input, preds } => {
                 input.write_chain(out, indent)?;
                 let method_pad = "  ".repeat(indent + 1);
-                writeln!(out, "{}.filter({:?}, {:?})", method_pad, label, value)
+                writeln!(out, "{}.filter({:?})", method_pad, preds)
             }
             Expr::Range { lo, hi } => {
                 writeln!(out, "{}range(", pad)?;
@@ -442,11 +494,10 @@ impl Expr {
         Expr::Intersection(inputs.into_iter().collect())
     }
 
-    pub fn filter(self, label: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn filter(self, preds: Vec<Predicate>) -> Self {
         Expr::Filter {
             input: Box::new(self),
-            label: label.into(),
-            value: value.into(),
+            preds,
         }
     }
 
@@ -467,29 +518,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rewrites() {
-        let expr = Expr::intersection_all([
-            Expr::union_all([
-                Expr::constant(vec![Vx(0)]).up(1, None),
-                Expr::constant(vec![Vx(3), Vx(4)]).down(1, Some(2)),
-            ]),
-            Expr::constant(vec![Vx(0)]).up(0, None).filter("name", "f"),
-        ]);
+    fn test_rewrites_ancestry() {
+        let planner = Planner::default();
+        let expr = Expr::constant(vec![Vx(0)])
+            .up(0, None)
+            .intersection(Expr::constant(vec![Vx(1)]).down(0, None))
+            .optimize(&planner);
 
-        insta::assert_snapshot!(expr.tree().to_string(), @r###"
-        intersection(
-          union(
-            constant([Vx(0)])
-              .up(1, *),
-            constant([Vx(3), Vx(4)])
-              .down(1, 2),
-          ),
-          constant([Vx(0)])
-            .up(0, *)
-            .filter("name", "f"),
+        insta::assert_snapshot!(expr.tree().to_string(), @"
+        range(
+          constant([Vx(0)]),
+          constant([Vx(1)]),
         )
-        "###);
+        ");
+    }
 
+    #[test]
+    fn test_rewrites_filter() {
+        let planner = Planner::default();
+        let expr = Expr::constant(vec![Vx(0)])
+            .up(0, None)
+            .intersection(Expr::constant(vec![Vx(1)]).down(0, None))
+            .optimize(&planner);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @"
+        range(
+          constant([Vx(0)]),
+          constant([Vx(1)]),
+        )
+        ");
+    }
+
+    #[test]
+    fn test_rewrites() {
         let planner = Planner::default();
         let expr = Expr::constant(vec![Vx(0)])
             .up(0, None)
@@ -549,6 +610,33 @@ mod tests {
         let planner = Planner::default();
         let expr = Expr::constant(vec![])
             .union(Expr::constant(vec![]))
+            .optimize(&planner);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @"none()");
+
+        let expr = Expr::constant(vec![Vx(0)])
+            .intersection(Expr::constant(vec![Vx(1)]))
+            .optimize(&planner);
+        insta::assert_snapshot!(expr.tree().to_string(), @"none()");
+
+        let expr = Expr::constant(vec![Vx(0)])
+            .intersection(Expr::constant(vec![Vx(0)]))
+            .optimize(&planner);
+        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Vx(0)])");
+
+        let expr = Expr::constant(vec![Vx(0)])
+            .intersection(Expr::All)
+            .optimize(&planner);
+        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Vx(0)])");
+
+        let expr = Expr::constant(vec![Vx(1)])
+            .intersection(Expr::constant(vec![Vx(0)]))
+            .optimize(&planner);
+        insta::assert_snapshot!(expr.tree().to_string(), @"none()");
+
+        let planner = Planner::default();
+        let expr = Expr::constant(vec![])
+            .intersection(Expr::constant(vec![]))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"none()");
