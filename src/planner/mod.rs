@@ -367,22 +367,21 @@ impl Planner {
                     }
                 }
 
-                // Move a filtered All to filter something else.  I'm not sure
-                // how we can best choose what to put this on, so for now lets
-                // put it on the leftmost. We could put it on everything but we
-                // probably want to put it on the smallest thing to avoid the
-                // most commit lookups.
                 {
-                    // At this point inputs.len() > 1.
+                    let mut yanked_preds = Vec::new();
                     for i in 0..inputs.len() {
-                        if let Expr::Filter { input, preds } = &inputs[i] {
-                            if **input == Expr::All {
-                                let Expr::Filter { preds, .. } = inputs.remove(i) else {
-                                    unreachable!();
-                                };
-                                inputs[0] = inputs[0].take().filter(preds);
-                                return Expr::Intersection(inputs).optimize(self);
-                            }
+                        if let Expr::Filter { .. } = &inputs[i] {
+                            let Expr::Filter { preds, input } = inputs[i].take() else {
+                                unreachable!();
+                            };
+                            inputs[i] = *input;
+                            yanked_preds.extend(preds);
+                        }
+                        if !yanked_preds.is_empty() {
+                            return Expr::Intersection(inputs)
+                                .optimize(self)
+                                .filter(yanked_preds)
+                                .optimize(self);
                         }
                     }
                 }
@@ -588,7 +587,21 @@ mod tests {
 
         insta::assert_snapshot!(expr.tree().to_string(), @r#"
         constant([Vx(0)])
-          .filter([Description("Some description"), Author("Justin")])
+          .filter([Author("Justin"), Description("Some description")])
+        "#);
+
+        let expr = Expr::constant(vec![Vx(0)])
+            .intersection(Expr::constant(vec![Vx(1)]).up(0, None))
+            .intersection(Expr::All.filter(vec![Predicate::Description("Some description".into())]))
+            .optimize(&planner);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @r#"
+        intersection(
+          constant([Vx(0)]),
+          constant([Vx(1)])
+            .up(0, *),
+        )
+          .filter([Description("Some description")])
         "#);
     }
 
