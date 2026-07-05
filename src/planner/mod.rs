@@ -262,6 +262,39 @@ impl Planner {
                     return Expr::Union(new_union).optimize(self);
                 }
 
+                // Pull up matching filters
+                {
+                    let mut intersection: Option<Vec<Predicate>> = None;
+                    for input in &inputs {
+                        if let Expr::Filter { preds, .. } = input {
+                            match &mut intersection {
+                                Some(intersection) => intersection.retain(|p| preds.contains(p)),
+                                None => intersection = Some(preds.clone()),
+                            }
+                        } else {
+                            intersection = Some(Vec::new());
+                        }
+                    }
+
+                    if let Some(intersection) = intersection
+                        && !intersection.is_empty()
+                    {
+                        // There's a filter that every arm shares, so let's yank it up.
+                        inputs = inputs
+                            .into_iter()
+                            .map(|e| {
+                                if let Expr::Filter { input, mut preds } = e {
+                                    preds.retain(|p| !intersection.contains(p));
+                                    input.filter(preds)
+                                } else {
+                                    unreachable!()
+                                }
+                            })
+                            .collect();
+                        return Expr::Union(inputs).filter(intersection).optimize(self);
+                    }
+                }
+
                 Expr::Union(inputs)
             }
             Expr::Intersection(inputs) => {
@@ -389,6 +422,13 @@ impl Planner {
                 Expr::Intersection(inputs)
             }
             Expr::Filter { input, mut preds } => {
+                // Eliminate trivial filter
+                {
+                    if preds.is_empty() {
+                        return *input;
+                    }
+                }
+
                 // Collapse multiple filters.
                 {
                     match *input {
@@ -602,6 +642,16 @@ mod tests {
             .up(0, *),
         )
           .filter([Description("Some description")])
+        "#);
+
+        let expr = Expr::constant(vec![Vx(0)])
+            .filter(vec![Predicate::Author("Justin".into())])
+            .union(Expr::constant(vec![Vx(1)]).filter(vec![Predicate::Author("Justin".into())]))
+            .optimize(&planner);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @r#"
+        constant([Vx(0), Vx(1)])
+          .filter([Author("Justin")])
         "#);
     }
 
