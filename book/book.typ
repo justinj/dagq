@@ -193,3 +193,23 @@ You might find it helpful to read `x::y` as "`x` *up to* `y`."
 But this would result in duplicating a bunch of the inputs, so for now I'm going
 to ignore that, and if there's exactly one up and one down I'll turn them into a
 range.
+
+= Enriched information
+
+Many operations can be done purely on the change IDs, but some need access to
+the underlying commit information, like author and description. Call a RevSet with this additional information "enriched."
+
+I am not sure yet how to model this, I see two main ways to go:
+
+== Enrichment as a logical operator
+
+If enrichment is logical, then every scan we can introduce as `Enriched(Scan)`,
+and we can push whatever filters we can past it. I think this is weird though,
+because it means we have to be careful about introducing *new* filters to an
+expression, since that expression might have lost its enrichment via pulling
+upwards. Weird, overall.
+
+== Enrichment as a physical property
+
+Alternatively enrichment could just be required by filters that use it. I'm not
+sure what implications this has, though.

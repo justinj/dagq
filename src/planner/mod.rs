@@ -12,12 +12,13 @@ impl Vx {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
     Author(String),
+    Description(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     None,
     All,
@@ -366,12 +367,47 @@ impl Planner {
                     }
                 }
 
+                // Move a filtered All to filter something else.  I'm not sure
+                // how we can best choose what to put this on, so for now lets
+                // put it on the leftmost. We could put it on everything but we
+                // probably want to put it on the smallest thing to avoid the
+                // most commit lookups.
+                {
+                    // At this point inputs.len() > 1.
+                    for i in 0..inputs.len() {
+                        if let Expr::Filter { input, preds } = &inputs[i] {
+                            if **input == Expr::All {
+                                let Expr::Filter { preds, .. } = inputs.remove(i) else {
+                                    unreachable!();
+                                };
+                                inputs[0] = inputs[0].take().filter(preds);
+                                return Expr::Intersection(inputs).optimize(self);
+                            }
+                        }
+                    }
+                }
+
                 Expr::Intersection(inputs)
             }
-            Expr::Filter { input, preds } => Expr::Filter {
-                input: Box::new(self.optimize(*input)),
-                preds,
-            },
+            Expr::Filter { input, mut preds } => {
+                // Collapse multiple filters.
+                {
+                    match *input {
+                        Expr::Filter {
+                            input,
+                            preds: inner_preds,
+                        } => {
+                            preds.extend(inner_preds.into_iter());
+                            return Expr::Filter { input, preds }.optimize(self);
+                        }
+                        _ => {}
+                    }
+                }
+                Expr::Filter {
+                    input: Box::new(self.optimize(*input)),
+                    preds,
+                }
+            }
         }
     }
 }
@@ -537,16 +573,23 @@ mod tests {
     fn test_rewrites_filter() {
         let planner = Planner::default();
         let expr = Expr::constant(vec![Vx(0)])
-            .up(0, None)
-            .intersection(Expr::constant(vec![Vx(1)]).down(0, None))
+            .intersection(Expr::All.filter(vec![Predicate::Author("Justin".into())]))
             .optimize(&planner);
 
-        insta::assert_snapshot!(expr.tree().to_string(), @"
-        range(
-          constant([Vx(0)]),
-          constant([Vx(1)]),
-        )
-        ");
+        insta::assert_snapshot!(expr.tree().to_string(), @r#"
+        constant([Vx(0)])
+          .filter([Author("Justin")])
+        "#);
+
+        let expr = Expr::constant(vec![Vx(0)])
+            .intersection(Expr::All.filter(vec![Predicate::Author("Justin".into())]))
+            .intersection(Expr::All.filter(vec![Predicate::Description("Some description".into())]))
+            .optimize(&planner);
+
+        insta::assert_snapshot!(expr.tree().to_string(), @r#"
+        constant([Vx(0)])
+          .filter([Description("Some description"), Author("Justin")])
+        "#);
     }
 
     #[test]
