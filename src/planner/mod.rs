@@ -1,5 +1,3 @@
-// TODO: share Vx with Rev
-
 use std::fmt;
 use std::fmt::Write;
 use std::ops::Range;
@@ -10,15 +8,9 @@ use jj_lib::revset::{
     RevsetCommitRef, RevsetExpression, RevsetFilterPredicate, UserRevsetExpression,
 };
 use jj_lib::str_util::{StringExpression, StringPattern};
+use vocab::Rev;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct Vx(pub usize);
-
-impl Vx {
-    fn next(&self) -> Self {
-        Vx(self.0 + 1)
-    }
-}
+mod lower;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
@@ -68,7 +60,7 @@ impl std::error::Error for LowerRevsetError {}
 pub enum Expr {
     None,
     All,
-    Constant(Vec<Vx>),
+    Constant(Vec<Rev>),
     Up {
         input: Box<Expr>,
         // Only include results if they appeared in the lo-th round.
@@ -111,8 +103,8 @@ fn lower_jj_expr(expr: &Arc<UserRevsetExpression>) -> Result<Expr, LowerRevsetEr
             .iter()
             .map(|id| {
                 id.hex()
-                    .parse::<usize>()
-                    .map(Vx)
+                    .parse::<u32>()
+                    .map(Rev)
                     .map_err(|_| LowerRevsetError::InvalidLiteral(id.hex()))
             })
             .collect::<Result<Vec<_>, _>>()
@@ -149,8 +141,8 @@ fn lower_jj_expr(expr: &Arc<UserRevsetExpression>) -> Result<Expr, LowerRevsetEr
 fn lower_commit_ref(commit_ref: &RevsetCommitRef) -> Result<Expr, LowerRevsetError> {
     match commit_ref {
         RevsetCommitRef::Symbol(symbol) => symbol
-            .parse::<usize>()
-            .map(|vx| Expr::constant(vec![Vx(vx)]))
+            .parse::<u32>()
+            .map(|rev| Expr::constant(vec![Rev(rev)]))
             .map_err(|_| LowerRevsetError::InvalidLiteral(symbol.clone())),
         _ => Err(LowerRevsetError::UnsupportedCommitRef(format!(
             "{commit_ref:?}"
@@ -286,7 +278,7 @@ impl Expr {
         std::mem::replace(self, Expr::All)
     }
 
-    fn unwrap_constant(self) -> Vec<Vx> {
+    fn unwrap_constant(self) -> Vec<Rev> {
         if let Expr::Constant(v) = self {
             v
         } else {
@@ -362,7 +354,7 @@ impl Planner {
                     return Expr::None;
                 }
 
-                vs.sort_unstable();
+                vs.sort_unstable_by_key(|rev| rev.0);
                 vs.dedup();
                 Expr::Constant(vs)
             }
@@ -765,7 +757,7 @@ impl Expr {
         writeln!(out, "{})", pad)
     }
 
-    pub fn constant(vxs: impl Into<Vec<Vx>>) -> Self {
+    pub fn constant(vxs: impl Into<Vec<Rev>>) -> Self {
         Expr::Constant(vxs.into())
     }
 
@@ -830,15 +822,15 @@ mod tests {
     #[test]
     fn test_rewrites_ancestry() {
         let planner = Planner::default();
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .up(0, None)
-            .intersection(Expr::constant(vec![Vx(1)]).down(0, None))
+            .intersection(Expr::constant(vec![Rev(1)]).down(0, None))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"
         range(
-          constant([Vx(0)]),
-          constant([Vx(1)]),
+          constant([Rev(0)]),
+          constant([Rev(1)]),
         )
         ");
     }
@@ -846,46 +838,46 @@ mod tests {
     #[test]
     fn test_rewrites_filter() {
         let planner = Planner::default();
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .intersection(Expr::All.filter(vec![Predicate::Author("Justin".into())]))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @r#"
-        constant([Vx(0)])
+        constant([Rev(0)])
           .filter([Author("Justin")])
         "#);
 
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .intersection(Expr::All.filter(vec![Predicate::Author("Justin".into())]))
             .intersection(Expr::All.filter(vec![Predicate::Description("Some description".into())]))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @r#"
-        constant([Vx(0)])
+        constant([Rev(0)])
           .filter([Author("Justin"), Description("Some description")])
         "#);
 
-        let expr = Expr::constant(vec![Vx(0)])
-            .intersection(Expr::constant(vec![Vx(1)]).up(0, None))
+        let expr = Expr::constant(vec![Rev(0)])
+            .intersection(Expr::constant(vec![Rev(1)]).up(0, None))
             .intersection(Expr::All.filter(vec![Predicate::Description("Some description".into())]))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @r#"
         intersection(
-          constant([Vx(0)]),
-          constant([Vx(1)])
+          constant([Rev(0)]),
+          constant([Rev(1)])
             .up(0, *),
         )
           .filter([Description("Some description")])
         "#);
 
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .filter(vec![Predicate::Author("Justin".into())])
-            .union(Expr::constant(vec![Vx(1)]).filter(vec![Predicate::Author("Justin".into())]))
+            .union(Expr::constant(vec![Rev(1)]).filter(vec![Predicate::Author("Justin".into())]))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @r#"
-        constant([Vx(0), Vx(1)])
+        constant([Rev(0), Rev(1)])
           .filter([Author("Justin")])
         "#);
     }
@@ -893,23 +885,23 @@ mod tests {
     #[test]
     fn test_rewrites() {
         let planner = Planner::default();
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .up(0, None)
             .up(0, None)
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"
-        constant([Vx(0)])
+        constant([Rev(0)])
           .up(0, *)
         ");
 
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .up(1, Some(1))
             .up(0, Some(1))
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"
-        constant([Vx(0)])
+        constant([Rev(0)])
           .up(1, 2)
         ");
 
@@ -923,30 +915,30 @@ mod tests {
                 ..RewriteRules::all()
             },
         };
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .up(0, None)
             .up(0, None)
             .optimize(&planner);
 
         insta::assert_snapshot!(expr.tree().to_string(), @"
-        constant([Vx(0)])
+        constant([Rev(0)])
           .up(0, *)
           .up(0, *)
         ");
 
         let planner = Planner::default();
-        let expr = Expr::constant(vec![Vx(0)])
-            .union(Expr::constant(vec![Vx(1)]))
+        let expr = Expr::constant(vec![Rev(0)])
+            .union(Expr::constant(vec![Rev(1)]))
             .optimize(&planner);
 
-        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Vx(0), Vx(1)])");
+        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Rev(0), Rev(1)])");
 
         let planner = Planner::default();
-        let expr = Expr::constant(vec![Vx(1)])
-            .union(Expr::constant(vec![Vx(0)]))
+        let expr = Expr::constant(vec![Rev(1)])
+            .union(Expr::constant(vec![Rev(0)]))
             .optimize(&planner);
 
-        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Vx(0), Vx(1)])");
+        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Rev(0), Rev(1)])");
 
         let planner = Planner::default();
         let expr = Expr::constant(vec![])
@@ -955,23 +947,23 @@ mod tests {
 
         insta::assert_snapshot!(expr.tree().to_string(), @"none()");
 
-        let expr = Expr::constant(vec![Vx(0)])
-            .intersection(Expr::constant(vec![Vx(1)]))
+        let expr = Expr::constant(vec![Rev(0)])
+            .intersection(Expr::constant(vec![Rev(1)]))
             .optimize(&planner);
         insta::assert_snapshot!(expr.tree().to_string(), @"none()");
 
-        let expr = Expr::constant(vec![Vx(0)])
-            .intersection(Expr::constant(vec![Vx(0)]))
+        let expr = Expr::constant(vec![Rev(0)])
+            .intersection(Expr::constant(vec![Rev(0)]))
             .optimize(&planner);
-        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Vx(0)])");
+        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Rev(0)])");
 
-        let expr = Expr::constant(vec![Vx(0)])
+        let expr = Expr::constant(vec![Rev(0)])
             .intersection(Expr::All)
             .optimize(&planner);
-        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Vx(0)])");
+        insta::assert_snapshot!(expr.tree().to_string(), @"constant([Rev(0)])");
 
-        let expr = Expr::constant(vec![Vx(1)])
-            .intersection(Expr::constant(vec![Vx(0)]))
+        let expr = Expr::constant(vec![Rev(1)])
+            .intersection(Expr::constant(vec![Rev(0)]))
             .optimize(&planner);
         insta::assert_snapshot!(expr.tree().to_string(), @"none()");
 

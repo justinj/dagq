@@ -18,8 +18,8 @@ macro_rules! optimized_tree {
 fn rewrites_ancestry_from_language() {
     insta::assert_snapshot!(optimized_tree!("0:: & ::1"), @"
     range(
-      constant([Vx(0)]),
-      constant([Vx(1)]),
+      constant([Rev(0)]),
+      constant([Rev(1)]),
     )
     ");
 }
@@ -27,31 +27,31 @@ fn rewrites_ancestry_from_language() {
 #[test]
 fn rewrites_filter_from_language() {
     insta::assert_snapshot!(optimized_tree!("0 & author(Justin)"), @r#"
-    constant([Vx(0)])
+    constant([Rev(0)])
       .filter([Author("Justin")])
     "#);
 
     insta::assert_snapshot!(optimized_tree!("0 & author(Justin) & author(Hamlet)"), @r#"
-    constant([Vx(0)])
+    constant([Rev(0)])
       .filter([Author("Justin"), Author("Hamlet")])
     "#);
 
     insta::assert_snapshot!(optimized_tree!("0 & author(Justin) & description(Some-description)"), @r#"
-    constant([Vx(0)])
+    constant([Rev(0)])
       .filter([Author("Justin"), Description("Some-description")])
     "#);
 
     insta::assert_snapshot!(optimized_tree!("0 & 1:: & description(Some-description)"), @r#"
     intersection(
-      constant([Vx(0)]),
-      constant([Vx(1)])
+      constant([Rev(0)]),
+      constant([Rev(1)])
         .up(0, *),
     )
       .filter([Description("Some-description")])
     "#);
 
     insta::assert_snapshot!(optimized_tree!("(0 & author(Justin)) | (1 & author(Justin))"), @r#"
-    constant([Vx(0), Vx(1)])
+    constant([Rev(0), Rev(1)])
       .filter([Author("Justin")])
     "#);
 }
@@ -59,7 +59,7 @@ fn rewrites_filter_from_language() {
 #[test]
 fn rewrites_up_from_language() {
     insta::assert_snapshot!(optimized_tree!("(0::)::"), @"
-    constant([Vx(0)])
+    constant([Rev(0)])
       .up(0, *)
     ");
 
@@ -72,16 +72,16 @@ fn rewrites_up_from_language() {
         },
         "0::",
     ), @"
-    constant([Vx(0)])
+    constant([Rev(0)])
       .up(0, *)
     ");
 }
 
 #[test]
 fn rewrites_constant_sets_from_language() {
-    insta::assert_snapshot!(optimized_tree!("0 | 1"), @"constant([Vx(0), Vx(1)])");
-    insta::assert_snapshot!(optimized_tree!("1 | 0"), @"constant([Vx(0), Vx(1)])");
+    insta::assert_snapshot!(optimized_tree!("0 | 1"), @"constant([Rev(0), Rev(1)])");
+    insta::assert_snapshot!(optimized_tree!("1 | 0"), @"constant([Rev(0), Rev(1)])");
     insta::assert_snapshot!(optimized_tree!("0 & 1"), @"none()");
-    insta::assert_snapshot!(optimized_tree!("0 & 0"), @"constant([Vx(0)])");
+    insta::assert_snapshot!(optimized_tree!("0 & 0"), @"constant([Rev(0)])");
     insta::assert_snapshot!(optimized_tree!("1 & 0"), @"none()");
 }

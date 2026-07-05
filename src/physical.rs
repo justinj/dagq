@@ -7,6 +7,7 @@ use std::{
 
 use reusable_iter::ReusableIntoIter;
 use smallvec::SmallVec;
+use vocab::Rev;
 
 // TODO: there should be another trait that only Forwards and Backwards implement.
 
@@ -96,29 +97,9 @@ pub(super) trait Bounded: Ord + Copy {
     const MAX: Self;
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Rev(pub(super) u32);
-
-impl Rev {
-    pub const MIN: Self = Rev(u32::MAX);
-    pub const MAX: Self = Rev(u32::MIN);
-}
-
 impl Bounded for Rev {
     const MIN: Self = Rev::MIN;
     const MAX: Self = Rev::MAX;
-}
-
-impl PartialOrd for Rev {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Rev {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.0.cmp(&self.0)
-    }
 }
 
 pub(super) type BoxOperator<'a, T, O> = Box<dyn Operator<T, O> + 'a>;
