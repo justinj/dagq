@@ -26,22 +26,22 @@ fn rewrites_ancestry_from_language() {
 
 #[test]
 fn rewrites_filter_from_language() {
-    insta::assert_snapshot!(optimized_tree!("0 & author(Justin)"), @r#"
+    insta::assert_snapshot!(optimized_tree!("0 & author(\"Justin\")"), @r#"
     constant([Rev(0)])
       .filter([Author("Justin")])
     "#);
 
-    insta::assert_snapshot!(optimized_tree!("0 & author(Justin) & author(Hamlet)"), @r#"
+    insta::assert_snapshot!(optimized_tree!("0 & author(\"Justin\") & author(\"Hamlet\")"), @r#"
     constant([Rev(0)])
       .filter([Author("Justin"), Author("Hamlet")])
     "#);
 
-    insta::assert_snapshot!(optimized_tree!("0 & author(Justin) & description(Some-description)"), @r#"
+    insta::assert_snapshot!(optimized_tree!("0 & author(\"Justin\") & description(\"Some-description\")"), @r#"
     constant([Rev(0)])
       .filter([Author("Justin"), Description("Some-description")])
     "#);
 
-    insta::assert_snapshot!(optimized_tree!("0 & 1:: & description(Some-description)"), @r#"
+    insta::assert_snapshot!(optimized_tree!("0 & 1:: & description(\"Some-description\")"), @r#"
     intersection(
       constant([Rev(0)]),
       constant([Rev(1)])
@@ -50,7 +50,7 @@ fn rewrites_filter_from_language() {
       .filter([Description("Some-description")])
     "#);
 
-    insta::assert_snapshot!(optimized_tree!("(0 & author(Justin)) | (1 & author(Justin))"), @r#"
+    insta::assert_snapshot!(optimized_tree!("(0 & author(\"Justin\")) | (1 & author(\"Justin\"))"), @r#"
     constant([Rev(0), Rev(1)])
       .filter([Author("Justin")])
     "#);
