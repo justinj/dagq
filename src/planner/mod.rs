@@ -2,6 +2,14 @@
 
 use std::fmt;
 use std::fmt::Write;
+use std::ops::Range;
+use std::sync::Arc;
+
+use jj_lib::object_id::ObjectId;
+use jj_lib::revset::{
+    RevsetCommitRef, RevsetExpression, RevsetFilterPredicate, UserRevsetExpression,
+};
+use jj_lib::str_util::{StringExpression, StringPattern};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Vx(pub usize);
@@ -17,6 +25,44 @@ pub enum Predicate {
     Author(String),
     Description(String),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LowerRevsetError {
+    InvalidLiteral(String),
+    UnsupportedExpression(&'static str),
+    UnsupportedCommitRef(String),
+    UnsupportedFilter(&'static str),
+    UnsupportedStringPattern(String),
+    GenerationOutOfRange(Range<u64>),
+}
+
+impl fmt::Display for LowerRevsetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LowerRevsetError::InvalidLiteral(literal) => write!(f, "invalid literal {literal:?}"),
+            LowerRevsetError::UnsupportedExpression(kind) => {
+                write!(f, "unsupported jj revset expression {kind}")
+            }
+            LowerRevsetError::UnsupportedCommitRef(commit_ref) => {
+                write!(f, "unsupported jj revset commit ref {commit_ref}")
+            }
+            LowerRevsetError::UnsupportedFilter(filter) => {
+                write!(f, "unsupported jj revset filter {filter}")
+            }
+            LowerRevsetError::UnsupportedStringPattern(pattern) => {
+                write!(f, "unsupported jj revset string pattern {pattern}")
+            }
+            LowerRevsetError::GenerationOutOfRange(range) => {
+                write!(
+                    f,
+                    "jj revset generation range {range:?} does not fit planner IR"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LowerRevsetError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
@@ -47,6 +93,192 @@ pub enum Expr {
         input: Box<Expr>,
         preds: Vec<Predicate>,
     },
+}
+
+pub fn lower_jj_revset(expr: &Arc<UserRevsetExpression>) -> Result<Expr, LowerRevsetError> {
+    lower_jj_expr(expr)
+}
+
+fn lower_jj_expr(expr: &Arc<UserRevsetExpression>) -> Result<Expr, LowerRevsetError> {
+    if let Some(predicate) = author_union_predicate(expr)? {
+        return Ok(Expr::All.filter(vec![predicate]));
+    }
+
+    match expr.as_ref() {
+        RevsetExpression::None => Ok(Expr::None),
+        RevsetExpression::All => Ok(Expr::All),
+        RevsetExpression::Commits(ids) => ids
+            .iter()
+            .map(|id| {
+                id.hex()
+                    .parse::<usize>()
+                    .map(Vx)
+                    .map_err(|_| LowerRevsetError::InvalidLiteral(id.hex()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Expr::constant),
+        RevsetExpression::CommitRef(commit_ref) => lower_commit_ref(commit_ref),
+        RevsetExpression::Ancestors {
+            heads, generation, ..
+        } => {
+            let (lo, hi) = lower_generation_range(generation)?;
+            Ok(lower_jj_expr(heads)?.down(lo, hi))
+        }
+        RevsetExpression::Descendants { roots, generation } => {
+            let (lo, hi) = lower_generation_range(generation)?;
+            Ok(lower_jj_expr(roots)?.up(lo, hi))
+        }
+        RevsetExpression::DagRange { roots, heads } => {
+            Ok(Expr::range(lower_jj_expr(roots)?, lower_jj_expr(heads)?))
+        }
+        RevsetExpression::Range { roots, heads, .. } => {
+            Ok(Expr::range(lower_jj_expr(roots)?, lower_jj_expr(heads)?))
+        }
+        RevsetExpression::Union(lhs, rhs) => Ok(lower_jj_expr(lhs)?.union(lower_jj_expr(rhs)?)),
+        RevsetExpression::Intersection(lhs, rhs) => {
+            Ok(lower_jj_expr(lhs)?.intersection(lower_jj_expr(rhs)?))
+        }
+        RevsetExpression::Difference(_, _) => {
+            Err(LowerRevsetError::UnsupportedExpression("difference"))
+        }
+        RevsetExpression::Filter(predicate) => Ok(Expr::All.filter(vec![lower_filter(predicate)?])),
+        _ => Err(LowerRevsetError::UnsupportedExpression(expr_kind(expr))),
+    }
+}
+
+fn lower_commit_ref(commit_ref: &RevsetCommitRef) -> Result<Expr, LowerRevsetError> {
+    match commit_ref {
+        RevsetCommitRef::Symbol(symbol) => symbol
+            .parse::<usize>()
+            .map(|vx| Expr::constant(vec![Vx(vx)]))
+            .map_err(|_| LowerRevsetError::InvalidLiteral(symbol.clone())),
+        _ => Err(LowerRevsetError::UnsupportedCommitRef(format!(
+            "{commit_ref:?}"
+        ))),
+    }
+}
+
+fn lower_generation_range(range: &Range<u64>) -> Result<(usize, Option<usize>), LowerRevsetError> {
+    let lo = usize::try_from(range.start)
+        .map_err(|_| LowerRevsetError::GenerationOutOfRange(range.clone()))?;
+    let hi = if range.end == u64::MAX {
+        None
+    } else {
+        let last = range
+            .end
+            .checked_sub(1)
+            .ok_or_else(|| LowerRevsetError::GenerationOutOfRange(range.clone()))?;
+        Some(
+            usize::try_from(last)
+                .map_err(|_| LowerRevsetError::GenerationOutOfRange(range.clone()))?,
+        )
+    };
+    Ok((lo, hi))
+}
+
+fn lower_filter(predicate: &RevsetFilterPredicate) -> Result<Predicate, LowerRevsetError> {
+    match predicate {
+        RevsetFilterPredicate::Description(expr) => Ok(Predicate::Description(lower_string(expr)?)),
+        RevsetFilterPredicate::AuthorName(expr) | RevsetFilterPredicate::AuthorEmail(expr) => {
+            Ok(Predicate::Author(lower_string(expr)?))
+        }
+        _ => Err(LowerRevsetError::UnsupportedFilter(filter_kind(predicate))),
+    }
+}
+
+fn lower_string(expr: &StringExpression) -> Result<String, LowerRevsetError> {
+    match expr {
+        StringExpression::Pattern(pattern) => match pattern.as_ref() {
+            StringPattern::Exact(s)
+            | StringPattern::ExactI(s)
+            | StringPattern::Substring(s)
+            | StringPattern::SubstringI(s) => Ok(s.clone()),
+            pattern => Err(LowerRevsetError::UnsupportedStringPattern(format!(
+                "{pattern:?}"
+            ))),
+        },
+        expr => Err(LowerRevsetError::UnsupportedStringPattern(format!(
+            "{expr:?}"
+        ))),
+    }
+}
+
+fn author_union_predicate(
+    expr: &Arc<UserRevsetExpression>,
+) -> Result<Option<Predicate>, LowerRevsetError> {
+    let RevsetExpression::Union(lhs, rhs) = expr.as_ref() else {
+        return Ok(None);
+    };
+    let (Some(lhs), Some(rhs)) = (author_filter(lhs)?, author_filter(rhs)?) else {
+        return Ok(None);
+    };
+    if lhs == rhs { Ok(Some(lhs)) } else { Ok(None) }
+}
+
+fn author_filter(expr: &Arc<UserRevsetExpression>) -> Result<Option<Predicate>, LowerRevsetError> {
+    let RevsetExpression::Filter(
+        RevsetFilterPredicate::AuthorName(string) | RevsetFilterPredicate::AuthorEmail(string),
+    ) = expr.as_ref()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Predicate::Author(lower_string(string)?)))
+}
+
+fn expr_kind(expr: &Arc<UserRevsetExpression>) -> &'static str {
+    match expr.as_ref() {
+        RevsetExpression::VisibleHeads => "visible_heads",
+        RevsetExpression::VisibleHeadsOrReferenced => "visible_heads_or_referenced",
+        RevsetExpression::Root => "root",
+        RevsetExpression::Reachable { .. } => "reachable",
+        RevsetExpression::Heads(_) => "heads",
+        RevsetExpression::HeadsRange { .. } => "heads_range",
+        RevsetExpression::Roots(_) => "roots",
+        RevsetExpression::ForkPoint(_) => "fork_point",
+        RevsetExpression::Forks => "forks",
+        RevsetExpression::Bisect(_) => "bisect",
+        RevsetExpression::HasSize { .. } => "has_size",
+        RevsetExpression::Latest { .. } => "latest",
+        RevsetExpression::AsFilter(_) => "as_filter",
+        RevsetExpression::Divergent => "divergent",
+        RevsetExpression::AtOperation { .. } => "at_operation",
+        RevsetExpression::WithinReference { .. } => "within_reference",
+        RevsetExpression::WithinVisibility { .. } => "within_visibility",
+        RevsetExpression::Coalesce(_, _) => "coalesce",
+        RevsetExpression::Present(_) => "present",
+        RevsetExpression::NotIn(_) => "not_in",
+        RevsetExpression::None
+        | RevsetExpression::All
+        | RevsetExpression::Commits(_)
+        | RevsetExpression::CommitRef(_)
+        | RevsetExpression::Ancestors { .. }
+        | RevsetExpression::Descendants { .. }
+        | RevsetExpression::Range { .. }
+        | RevsetExpression::DagRange { .. }
+        | RevsetExpression::Filter(_)
+        | RevsetExpression::Union(_, _)
+        | RevsetExpression::Intersection(_, _)
+        | RevsetExpression::Difference(_, _) => "supported",
+    }
+}
+
+fn filter_kind(predicate: &RevsetFilterPredicate) -> &'static str {
+    match predicate {
+        RevsetFilterPredicate::ParentCount(_) => "parent_count",
+        RevsetFilterPredicate::Description(_) => "description",
+        RevsetFilterPredicate::Subject(_) => "subject",
+        RevsetFilterPredicate::AuthorName(_) => "author_name",
+        RevsetFilterPredicate::AuthorEmail(_) => "author_email",
+        RevsetFilterPredicate::AuthorDate(_) => "author_date",
+        RevsetFilterPredicate::CommitterName(_) => "committer_name",
+        RevsetFilterPredicate::CommitterEmail(_) => "committer_email",
+        RevsetFilterPredicate::CommitterDate(_) => "committer_date",
+        RevsetFilterPredicate::File(_) => "file",
+        RevsetFilterPredicate::DiffLines { .. } => "diff_lines",
+        RevsetFilterPredicate::HasConflict => "has_conflict",
+        RevsetFilterPredicate::Signed => "signed",
+        RevsetFilterPredicate::Extension(_) => "extension",
+    }
 }
 
 impl Expr {
