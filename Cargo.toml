@@ -11,7 +11,3 @@ smallvec = "1"
 [dev-dependencies]
 criterion = "0.5"
 insta = "1"
-
-[[bench]]
-name = "chain"
-harness = false
